@@ -63,24 +63,44 @@ This software is designed to be run on the **Victim VM** (e.g., an Ubuntu Server
 
 The `run_experiment.py` orchestrator script guides you through the 4 core phases of the dataset generation process.
 
-### Standard Execution (Interactive Mode)
-Run the following command on the Victim VM, replacing the IPs with your actual lab IP addresses:
+### Standard Execution (The Golden Path)
+To guarantee a perfectly clean dataset with zero internet background noise, run this exact command on the Victim VM. It instructs the engine to capture the full attack pipeline while strictly filtering for packets that involve your Attacker VM:
 
 ```bash
 sudo python3 run_experiment.py \
     --interface enp0s3 \
     --attacker-ip 10.0.0.10 \
     --victim-ip 10.0.0.20 \
+    --extra-filter "host 10.0.0.10" \
     --outdir ~/captures
 ```
 
-The script will pause and prompt you at each step. When prompted to start an attack, switch to your Kali VM, run the relevant attack (e.g., `nmap`, `hydra`), and press ENTER on the Victim VM when the attack finishes. The script manages the precise UTC timestamps in `labels.log`.
+The script will pause and prompt you at each step. When prompted, switch to your Kali VM, run the relevant attack, and press ENTER on the Victim VM when the attack finishes. The script manages the precise UTC timestamps in `labels.log`.
 
 ### Automated Execution
-If you have configured SSH keys between the machines, or are running the attacks locally against a Docker container, you can use the `--auto` flag. The script will automatically spawn the attack commands as subprocesses and terminate them after a defined duration.
+If you have configured SSH keys between the machines, you can automate the timing:
 
 ```bash
-sudo python3 run_experiment.py --interface enp0s3 --auto --phpsessid "your_dvwa_cookie"
+sudo python3 run_experiment.py \
+    --interface enp0s3 \
+    --attacker-ip 10.0.0.10 \
+    --victim-ip 10.0.0.20 \
+    --extra-filter "host 10.0.0.10" \
+    --auto \
+    --phpsessid "your_dvwa_cookie"
+```
+
+### Standalone Targeted Captures
+If you only want to capture a single specific event (like an ICMP ping or a single port scan) rather than the whole pipeline, use these simplified scripts:
+
+**Capture just a ping:**
+```bash
+sudo python3 capture_benign.py --interface enp0s3 --extra-filter "icmp and host 10.0.0.10"
+```
+
+**Capture just a port scan:**
+```bash
+sudo python3 capture_portscan.py --interface enp0s3 --extra-filter "host 10.0.0.10"
 ```
 
 ### Pipeline Phases Explained

@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""
+capture_benign.py
+=================
+Standalone script to capture ONLY normal (benign) traffic.
+Uses the existing ids_capture engine without modifying any other files.
+
+Usage:
+    sudo python3 capture_benign.py --interface enp0s3 --extra-filter "icmp and host 10.0.0.10 and host 10.0.0.20"
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+from ids_capture import CaptureSession, list_interfaces
+
+def main():
+    p = argparse.ArgumentParser(description="Capture benign (normal) traffic.")
+    p.add_argument("--interface", "-i", help="Network interface to capture on.")
+    p.add_argument("--outdir", default="~/captures", help="Output directory [default: ~/captures]")
+    p.add_argument("--duration", type=int, default=0, help="Seconds to capture (0 = interactive manual stop) [default: 0]")
+    p.add_argument("--extra-filter", default="", help="BPF filter string (e.g., 'icmp' or 'host 10.0.0.10')")
+    
+    args = p.parse_args()
+
+    # List interfaces if none is provided
+    if not args.interface:
+        print("Available network interfaces:\n")
+        for iface in list_interfaces():
+            print(f"  [{iface['index']}] {iface['name']}  (via {iface['source']})")
+        print("\nRe-run with --interface <name>")
+        sys.exit(0)
+
+    outdir = Path(args.outdir).expanduser().resolve()
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    print("\n============================================================")
+    print("  BENIGN TRAFFIC CAPTURE")
+    print("============================================================")
+    print(f"  Interface : {args.interface}")
+    print(f"  Output dir: {outdir}")
+    print("============================================================\n")
+    
+    with CaptureSession(
+        interface=args.interface,
+        label="BENIGN",
+        outdir=outdir,
+        extra_filter=args.extra_filter,
+    ) as cap:
+        if args.duration > 0:
+            cap.wait(args.duration)
+        else:
+            try:
+                input("  [Capture running] Generate normal background traffic now. Press ENTER to stop: ")
+            except (EOFError, KeyboardInterrupt):
+                print()
+
+    print(f"\n[✓] Capture complete!")
+    print(f"    PCAP file saved to: {cap.pcap_path}")
+
+if __name__ == "__main__":
+    main()

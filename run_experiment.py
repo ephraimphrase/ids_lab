@@ -14,8 +14,10 @@ dumpcap / tshark installed).  You run attacks manually from the ATTACKER
 VM (Kali) while this script manages captures, timestamps, and labels.
 
 Usage:
-    sudo python3 run_experiment.py --interface enp0s3 \\
-                                   --attacker-ip 10.0.0.10 \\
+    sudo python3 run_experiment.py --interface enp0s3 \
+                                   --attacker-ip 10.0.0.10 \
+                                   --victim-ip 10.0.0.20 \
+                                   --extra-filter "host 10.0.0.10" \
                                    --outdir ~/captures
 
 Interactive mode (default): the script prompts you at each step.
@@ -138,7 +140,7 @@ def _check_prerequisites() -> None:
 # Phase 3: Benign capture
 # ---------------------------------------------------------------------------
 
-def run_benign(interface: str, outdir: Path, duration: int) -> Path:
+def run_benign(interface: str, outdir: Path, duration: int, extra_filter: str = "") -> Path:
     _print_banner("PHASE 3 — Dataset A: BENIGN traffic")
     print(
         "Generate ordinary traffic to the victim now:\n"
@@ -151,6 +153,7 @@ def run_benign(interface: str, outdir: Path, duration: int) -> Path:
         interface=interface,
         label="BENIGN",
         outdir=outdir,
+        extra_filter=extra_filter,
     ) as cap:
         if duration > 0:
             cap.wait(duration)
@@ -171,6 +174,7 @@ def run_attacks(
     victim_ip: str,
     auto: bool,
     phpsessid: str,
+    extra_filter: str = "",
 ) -> list[Path]:
     _print_banner("PHASE 4 — Dataset B: ATTACK traffic")
     pcap_paths = []
@@ -192,6 +196,7 @@ def run_attacks(
             interface=interface,
             label=label,
             outdir=outdir,
+            extra_filter=extra_filter,
             # For DoS: cap file size to avoid filling disk
             ring_buffer_mb=512 if "Flood" in label or "DoS" in label else None,
             # Hard packet cap for SYN flood
@@ -375,6 +380,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="DVWA PHPSESSID cookie value for automated web attacks.",
     )
     p.add_argument(
+        "--extra-filter",
+        default="",
+        help="Optional BPF filter string to apply to all captures (e.g. 'host 10.0.0.10').",
+    )
+    p.add_argument(
         "--skip-benign", action="store_true", help="Skip Phase 3 (benign capture)."
     )
     p.add_argument(
@@ -441,7 +451,7 @@ def main() -> None:
     # Normal pipeline
     # ------------------------------------------------------------------
     if not args.skip_benign:
-        run_benign(args.interface, outdir, args.benign_duration)
+        run_benign(args.interface, outdir, args.benign_duration, args.extra_filter)
 
     if not args.skip_attacks:
         run_attacks(
@@ -451,6 +461,7 @@ def main() -> None:
             victim_ip=args.victim_ip,
             auto=args.auto,
             phpsessid=args.phpsessid,
+            extra_filter=args.extra_filter,
         )
 
     if not args.skip_verify:
