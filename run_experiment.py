@@ -14,11 +14,12 @@ dumpcap / tshark installed).  You run attacks manually from the ATTACKER
 VM (Kali) while this script manages captures, timestamps, and labels.
 
 Usage:
+    # Use --interface enp0s3 for VirtualBox, or --interface ens33 for VMware.
     sudo python3 run_experiment.py --interface enp0s3 \
                                    --attacker-ip 10.0.0.10 \
                                    --victim-ip 10.0.0.20 \
                                    --extra-filter "host 10.0.0.10" \
-                                   --outdir ~/captures
+                                   --outdir /home/ubuntu/captures
 
 Interactive mode (default): the script prompts you at each step.
 Automated mode (--auto):    the script controls the attack subprocess
@@ -414,12 +415,21 @@ def main() -> None:
     args = parser.parse_args()
 
     # List interfaces and exit if no interface given
+    available_ifaces = list_interfaces()
     if not args.interface:
         print("Available network interfaces:\n")
-        for iface in list_interfaces():
+        for iface in available_ifaces:
             print(f"  [{iface['index']}] {iface['name']}  (via {iface['source']})")
         print("\nRe-run with --interface <name>")
         sys.exit(0)
+
+    # Validate the chosen interface exists
+    valid_names = [i["name"] for i in available_ifaces]
+    if args.interface not in valid_names:
+        print(f"\n[ERROR] Interface '{args.interface}' does not exist on this system.")
+        print(f"        Available interfaces: {', '.join(valid_names)}")
+        print("        (If you are on VMware, you likely need 'ens33' or 'eth0')\n")
+        sys.exit(1)
 
     outdir = Path(args.outdir).expanduser().resolve()
     outdir.mkdir(parents=True, exist_ok=True)

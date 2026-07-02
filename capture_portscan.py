@@ -6,6 +6,7 @@ Standalone script to capture ONLY port scanning traffic.
 Uses the existing ids_capture engine without modifying any other files.
 
 Usage:
+    # Use --interface enp0s3 for VirtualBox, or --interface ens33 for VMware.
     sudo python3 capture_portscan.py --interface enp0s3
     
 Or, to filter specifically for the attacker's IP:
@@ -28,12 +29,18 @@ def main():
     args = p.parse_args()
 
     # List interfaces if none is provided
+    available_ifaces = list_interfaces()
     if not args.interface:
         print("Available network interfaces:\n")
-        for iface in list_interfaces():
+        for iface in available_ifaces:
             print(f"  [{iface['index']}] {iface['name']}  (via {iface['source']})")
         print("\nRe-run with --interface <name>")
         sys.exit(0)
+
+    valid_names = [i["name"] for i in available_ifaces]
+    if args.interface not in valid_names:
+        print(f"\n[ERROR] Interface '{args.interface}' does not exist on this system.")
+        sys.exit(1)
 
     outdir = Path(args.outdir).expanduser().resolve()
     outdir.mkdir(parents=True, exist_ok=True)

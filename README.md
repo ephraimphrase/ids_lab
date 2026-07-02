@@ -64,7 +64,9 @@ This software is designed to be run on the **Victim VM** (e.g., an Ubuntu Server
 The `run_experiment.py` orchestrator script guides you through the 4 core phases of the dataset generation process.
 
 ### Standard Execution (The Golden Path)
-To guarantee a perfectly clean dataset with zero internet background noise, run this exact command on the Victim VM. It instructs the engine to capture the full attack pipeline while strictly filtering for packets that involve your Attacker VM:
+To guarantee a perfectly clean dataset with zero internet background noise, run this exact command on the Victim VM. It instructs the engine to capture the full attack pipeline while strictly filtering for packets that involve your Attacker VM.
+
+*(**Important Note on Interfaces:** The command below uses `--interface enp0s3`, which is the default for VirtualBox. If you are running VMware, you must change this to `--interface ens33`. If you are on a bare-metal Linux server, it might be `--interface eth0`. You can always run `ip a` to check).*
 
 ```bash
 sudo python3 run_experiment.py \
@@ -72,7 +74,7 @@ sudo python3 run_experiment.py \
     --attacker-ip 10.0.0.10 \
     --victim-ip 10.0.0.20 \
     --extra-filter "host 10.0.0.10" \
-    --outdir ~/captures
+    --outdir /home/ubuntu/captures
 ```
 
 The script will pause and prompt you at each step. When prompted, switch to your Kali VM, run the relevant attack, and press ENTER on the Victim VM when the attack finishes. The script manages the precise UTC timestamps in `labels.log`.
@@ -161,9 +163,10 @@ Once the pipeline completes, your `--outdir` will contain:
 
 | Issue | Solution |
 |-------|----------|
-| **Wrong Interface Name** | Do not assume `eth0`. Run `ip a` or `python3 run_experiment.py` to list valid interfaces. |
+| **Wrong Interface Name** | Do not assume `eth0`. VirtualBox uses `enp0s3`, VMware uses `ens33`. Run `ip a` or run the script with no arguments to list valid interfaces. |
 | **Zero-packet PCAPs** | Ensure `dumpcap` has correct permissions. Run the orchestrator with `sudo`. |
 | **Clock Drift** | If your PCAP timestamps don't match your `labels.log`, your VM clocks are drifting. Install VirtualBox Guest Additions/VMware Tools on both VMs to sync time with the host. |
 | **Internet Leakage** | If your `BENIGN` traffic is full of random internet scans, your VM is exposed. Set your hypervisor network adapter to **Internal Network** or **Host-Only**. |
 | **Missing Flow Labels** | Ensure you provided the correct `--attacker-ip`. If the IP in the script doesn't match the Kali VM's actual IP, `labels.py` will classify the attacks as `BENIGN`. |
 | **DVWA Attacks Failing** | Set DVWA Security Level to **Low**. For Hydra, ensure you are attacking `/vulnerabilities/brute/` and passing the correct `PHPSESSID` cookie. |
+| **Permission Denied opening PCAPs** | Because the script runs with `sudo`, using `~/captures` saves files to `/root/captures/`. Use an absolute path like `/home/ubuntu/captures` instead to keep files accessible to your normal user. |

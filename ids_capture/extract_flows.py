@@ -247,6 +247,10 @@ class FlowExtractor:
           4. Write CSV
           5. Return DataFrame
         """
+        if self.pcap.stat().st_size < 24:
+            print(f"  [WARNING] Skipping {self.pcap.name}: File is empty or corrupted (< 24 bytes).")
+            return pd.DataFrame()
+
         print(f"[extract] Reading packets from: {self.pcap}", flush=True)
         packets = self._read_packets()
         print(f"[extract] Parsed {len(packets):,} packets", flush=True)
