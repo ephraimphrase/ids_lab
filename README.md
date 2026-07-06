@@ -97,12 +97,23 @@ If you only want to capture a single specific event (like an ICMP ping or a sing
 
 **Capture just a ping:**
 ```bash
-sudo python3 capture_benign.py --interface enp0s3 --extra-filter "icmp and host 10.0.0.10"
+sudo python3 capture_benign.py --interface ens33 --extra-filter "icmp and host 10.0.0.10"
 ```
 
 **Capture just a port scan:**
 ```bash
-sudo python3 capture_portscan.py --interface enp0s3 --extra-filter "host 10.0.0.10"
+sudo python3 capture_portscan.py --interface ens33 --extra-filter "host 10.0.0.10"
+```
+
+**Capture a DoS attack** (SYN flood by default; add `--type udp` for a UDP flood):
+```bash
+sudo python3 capture_dos.py --interface ens33 --outdir /home/ubuntu/captures --extra-filter "host 10.0.0.10"
+```
+
+**Capture a DDoS attack** (multi-source spoofed SYN flood across several ports):
+> ⚠️ Because hping3's `--rand-source` randomises the source IP, filtering by `host <attacker_ip>` will **not** work. Filter by the victim's destination instead.
+```bash
+sudo python3 capture_ddos.py --interface ens33 --outdir /home/ubuntu/captures --extra-filter "dst host 10.0.0.20 and tcp"
 ```
 
 ### Pipeline Phases Explained
@@ -110,7 +121,7 @@ sudo python3 capture_portscan.py --interface enp0s3 --extra-filter "host 10.0.0.
 | Phase | Description | Output |
 |-------|-------------|--------|
 | **Phase 3: Benign** | Generates baseline background traffic. You should manually browse the web app, run pings, and transfer files while this runs. | `BENIGN_<ts>.pcap` |
-| **Phase 4: Attacks** | Captures individual attacks: PortScan, SSH Brute Force, Web Brute Force, SQL Injection, and DoS SYN Flood. | `<Attack>_<ts>.pcap` |
+| **Phase 4: Attacks** | Captures individual attacks: PortScan, SSH Brute Force, Web Brute Force, SQL Injection, DoS SYN Flood, DoS UDP Flood, and DDoS SYN Flood. | `<Attack>_<ts>.pcap` |
 | **Phase 5: Verification** | Cross-references the PCAPs with the timestamp log, applying heuristic filters to prove the attack traffic exists. | `verification_table.md` |
 | **Phase 7: Extraction** | Parses all PCAPs, aggregates bidirectional flows, calculates ML features, and applies labels based on `labels.log`. | `ids_dataset.csv` |
 

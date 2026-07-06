@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
 """
-capture_portscan.py
-===================
-Standalone script to capture ONLY port scanning traffic.
-Run this script on the VICTIM VM BEFORE starting the nmap scan on the Attacker VM.
+capture_dos.py
+==============
+Standalone script to capture a single-source DoS (Denial of Service) attack.
+Two modes are supported via --type:
+
+  syn  — TCP SYN Flood (default): attacker hammers a port with SYN packets
+          but never completes the handshake, exhausting the victim's connection table.
+          Tool: sudo hping3 -S -p 80 -c 500000 <victim_ip>
+
+  udp  — UDP Flood: attacker sends raw UDP datagrams at maximum rate,
+          exhausting bandwidth and CPU without requiring a TCP handshake.
+          Tool: sudo hping3 --udp -p 80 -c 500000 <victim_ip>
+
+Run this script on the VICTIM VM BEFORE starting the attack on the Attacker VM.
 
 Usage:
     # Use --interface enp0s3 for VirtualBox, or --interface ens33 for VMware.
-    sudo python3 capture_portscan.py --interface ens33
+    sudo python3 capture_dos.py --interface ens33 --extra-filter "host 10.0.0.10"
 
-Or, to filter specifically for the attacker's IP:
-    sudo python3 capture_portscan.py --interface ens33 --extra-filter "host 10.0.0.10"
+    # To capture a UDP flood instead:
+    sudo python3 capture_dos.py --interface ens33 --type udp --extra-filter "host 10.0.0.10"
 
     # Use an absolute outdir to avoid files being saved to /root/ when using sudo:
-    sudo python3 capture_portscan.py --interface ens33 --outdir /home/ubuntu/captures --extra-filter "host 10.0.0.10"
+    sudo python3 capture_dos.py --interface ens33 --outdir /home/ubuntu/captures --extra-filter "host 10.0.0.10"
 """
 
 # ---------------------------------------------------------------------------
@@ -270,8 +280,16 @@ class CaptureSession:
 # ---------------------------------------------------------------------------
 
 def main():
-    p = argparse.ArgumentParser(description="Capture Port Scan traffic.")
+    p = argparse.ArgumentParser(
+        description="Capture a single-source DoS attack (SYN flood or UDP flood)."
+    )
     p.add_argument("--interface", "-i", help="Network interface to capture on.")
+    p.add_argument(
+        "--type",
+        choices=["syn", "udp"],
+        default="syn",
+        help="DoS attack type to label the capture: 'syn' (TCP SYN Flood) or 'udp' (UDP Flood) [default: syn]",
+    )
     p.add_argument(
         "--outdir",
         default="/home/ubuntu/captures",
@@ -286,12 +304,13 @@ def main():
     p.add_argument(
         "--extra-filter",
         default="",
-        help="BPF filter string (e.g., 'host 10.0.0.10').",
+        help="BPF filter string to restrict capture (e.g., 'host 10.0.0.10'). "
+             "Strongly recommended to keep the PCAP clean.",
     )
 
     args = p.parse_args()
 
-    # List interfaces if none is provided
+    # List interfaces and exit if none provided
     available_ifaces = list_interfaces()
     if not args.interface:
         print("Available network interfaces:\n")
@@ -300,6 +319,7 @@ def main():
         print("\nRe-run with --interface <name>")
         sys.exit(0)
 
+    # Validate the chosen interface actually exists
     valid_names = [i["name"] for i in available_ifaces]
     if args.interface not in valid_names:
         print(f"\n[ERROR] Interface '{args.interface}' does not exist on this system.")
@@ -310,29 +330,43 @@ def main():
     outdir = Path(args.outdir).expanduser().resolve()
     outdir.mkdir(parents=True, exist_ok=True)
 
+    # Determine the label and attack hint based on the chosen type
+    if args.type == "udp":
+        label = "DoSUDPFlood"
+        attack_hint = "sudo hping3 --udp -p 80 -c 500000 <victim_ip>"
+    else:
+        label = "DoSSYNFlood"
+        attack_hint = "sudo hping3 -S -p 80 -c 500000 <victim_ip>"
+
     print("\n============================================================")
-    print("  PORT SCAN CAPTURE")
+    print(f"  DOS CAPTURE  [{label}]")
     print("============================================================")
     print(f"  Interface : {args.interface}")
     print(f"  Output dir: {outdir}")
     if args.extra_filter:
         print(f"  BPF Filter: {args.extra_filter}")
-    print()
-    print("  On your Attacker VM (Kali), run:")
-    print("      sudo nmap -sS -p 1-1024 <victim_ip>")
+    print(f"\n  On your Attacker VM (Kali), run:")
+    print(f"      {attack_hint}")
     print("============================================================\n")
 
     with CaptureSession(
         interface=args.interface,
-        label="PortScan",
+        label=label,
         outdir=outdir,
         extra_filter=args.extra_filter,
+        # Ring-buffer capped at 512 MB to prevent disk exhaustion during floods
+        ring_buffer_mb=512,
+        # Hard packet cap to prevent runaway captures
+        max_packets=600_000,
     ) as cap:
         if args.duration > 0:
             cap.wait(args.duration)
         else:
             try:
-                input("  [Capture running] Run your nmap scan from the attacker VM now. Press ENTER to stop: ")
+                input(
+                    "  [Capture running] Launch your DoS attack on the attacker VM now. "
+                    "Press ENTER to stop: "
+                )
             except (EOFError, KeyboardInterrupt):
                 print()
 

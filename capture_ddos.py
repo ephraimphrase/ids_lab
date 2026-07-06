@@ -1,19 +1,42 @@
 #!/usr/bin/env python3
 """
-capture_portscan.py
-===================
-Standalone script to capture ONLY port scanning traffic.
-Run this script on the VICTIM VM BEFORE starting the nmap scan on the Attacker VM.
+capture_ddos.py
+===============
+Standalone script to capture a simulated DDoS (Distributed Denial of Service) attack.
+
+What makes DDoS different from DoS in this context:
+  - DoS:  a single source IP floods the victim.
+  - DDoS: many different source IPs flood the victim simultaneously (a botnet).
+
+Since a real botnet is impractical in a lab, this is simulated using hping3's
+'--rand-source' flag, which randomises the source IP per packet. The result is
+traffic that closely mirrors the signature of a real DDoS: the victim receives
+SYN packets from hundreds of different IP addresses at high volume.
+
+On your Attacker VM (Kali), run the following commands in parallel before pressing
+ENTER on this script:
+
+    sudo hping3 -S --rand-source -p 80  -c 200000 <victim_ip> &
+    sudo hping3 -S --rand-source -p 443 -c 200000 <victim_ip> &
+    sudo hping3 -S --rand-source -p 22  -c 100000 <victim_ip> &
+    wait
+
+This hits three ports simultaneously from random sources, generating the
+multi-source, multi-port signature characteristic of a DDoS attack.
+
+Run this script on the VICTIM VM BEFORE starting the attack on the Attacker VM.
 
 Usage:
     # Use --interface enp0s3 for VirtualBox, or --interface ens33 for VMware.
-    sudo python3 capture_portscan.py --interface ens33
-
-Or, to filter specifically for the attacker's IP:
-    sudo python3 capture_portscan.py --interface ens33 --extra-filter "host 10.0.0.10"
+    sudo python3 capture_ddos.py --interface ens33 --extra-filter "dst host 10.0.0.20 and tcp"
 
     # Use an absolute outdir to avoid files being saved to /root/ when using sudo:
-    sudo python3 capture_portscan.py --interface ens33 --outdir /home/ubuntu/captures --extra-filter "host 10.0.0.10"
+    sudo python3 capture_ddos.py --interface ens33 --outdir /home/ubuntu/captures
+
+NOTE on --extra-filter for DDoS:
+    Because hping3's '--rand-source' randomises the source IP, filtering by
+    'host <attacker_ip>' will NOT capture any DDoS traffic. Use 'dst host <victim_ip>'
+    to filter by destination (the victim) instead.
 """
 
 # ---------------------------------------------------------------------------
@@ -270,7 +293,9 @@ class CaptureSession:
 # ---------------------------------------------------------------------------
 
 def main():
-    p = argparse.ArgumentParser(description="Capture Port Scan traffic.")
+    p = argparse.ArgumentParser(
+        description="Capture a simulated multi-source DDoS SYN flood attack."
+    )
     p.add_argument("--interface", "-i", help="Network interface to capture on.")
     p.add_argument(
         "--outdir",
@@ -286,12 +311,15 @@ def main():
     p.add_argument(
         "--extra-filter",
         default="",
-        help="BPF filter string (e.g., 'host 10.0.0.10').",
+        help="BPF filter string to restrict capture. "
+             "NOTE: because '--rand-source' spoofs source IPs, filtering by "
+             "attacker IP will NOT work for DDoS. Filter by victim IP or port instead "
+             "(e.g., 'dst host 10.0.0.20 and tcp').",
     )
 
     args = p.parse_args()
 
-    # List interfaces if none is provided
+    # List interfaces and exit if none provided
     available_ifaces = list_interfaces()
     if not args.interface:
         print("Available network interfaces:\n")
@@ -300,6 +328,7 @@ def main():
         print("\nRe-run with --interface <name>")
         sys.exit(0)
 
+    # Validate the chosen interface actually exists
     valid_names = [i["name"] for i in available_ifaces]
     if args.interface not in valid_names:
         print(f"\n[ERROR] Interface '{args.interface}' does not exist on this system.")
@@ -311,28 +340,42 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
 
     print("\n============================================================")
-    print("  PORT SCAN CAPTURE")
+    print("  DDOS CAPTURE  [DDoSSYNFlood]")
     print("============================================================")
     print(f"  Interface : {args.interface}")
     print(f"  Output dir: {outdir}")
     if args.extra_filter:
         print(f"  BPF Filter: {args.extra_filter}")
     print()
-    print("  On your Attacker VM (Kali), run:")
-    print("      sudo nmap -sS -p 1-1024 <victim_ip>")
+    print("  On your Attacker VM (Kali), run ALL of these at once:")
+    print("      sudo hping3 -S --rand-source -p 80  -c 200000 <victim_ip> &")
+    print("      sudo hping3 -S --rand-source -p 443 -c 200000 <victim_ip> &")
+    print("      sudo hping3 -S --rand-source -p 22  -c 100000 <victim_ip> &")
+    print("      wait")
+    print()
+    print("  NOTE: '--rand-source' spoofs the source IP, so filtering by")
+    print("        attacker IP will NOT capture this traffic. If using")
+    print("        --extra-filter, use 'dst host <victim_ip> and tcp' instead.")
     print("============================================================\n")
 
     with CaptureSession(
         interface=args.interface,
-        label="PortScan",
+        label="DDoSSYNFlood",
         outdir=outdir,
         extra_filter=args.extra_filter,
+        # Ring-buffer capped at 512 MB to prevent disk exhaustion during floods
+        ring_buffer_mb=512,
+        # Hard packet cap to prevent runaway captures
+        max_packets=600_000,
     ) as cap:
         if args.duration > 0:
             cap.wait(args.duration)
         else:
             try:
-                input("  [Capture running] Run your nmap scan from the attacker VM now. Press ENTER to stop: ")
+                input(
+                    "  [Capture running] Launch your DDoS attack on the attacker VM now. "
+                    "Press ENTER to stop: "
+                )
             except (EOFError, KeyboardInterrupt):
                 print()
 
