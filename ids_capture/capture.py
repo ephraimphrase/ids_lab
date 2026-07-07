@@ -9,7 +9,7 @@ sniffer loop, which drops packets under DoS load (Section 3.2 of the guide).
 Usage:
     from ids_capture.capture import CaptureSession
     with CaptureSession(interface="enp0s3", label="PortScan",
-                        outdir="~/captures") as cap:
+                        outdir="/home/ubuntu/captures") as cap:
         # run your attack here, or wait, or call cap.wait()
         pass
     print(cap.pcap_path)   # full path to the written pcap
@@ -22,6 +22,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,6 +103,53 @@ def list_interfaces() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Live capture progress monitor (runs in a background daemon thread)
+# ---------------------------------------------------------------------------
+
+class _CaptureMonitor:
+    """
+    Daemon thread that prints live PCAP size and elapsed time every N seconds
+    while a capture session is active.  Completely non-blocking — the main
+    thread is never paused waiting for this.
+
+    The thread stops itself the moment stop() is called or the event is set.
+    """
+
+    def __init__(self, pcap_path: Path, label: str, interval: float = 2.0):
+        self._pcap_path = pcap_path
+        self._label = label
+        self._interval = interval
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"monitor-{label}",
+            daemon=True,   # dies automatically if the main thread exits
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=self._interval + 1)
+
+    def _run(self) -> None:
+        start = time.monotonic()
+        while not self._stop_event.wait(timeout=self._interval):
+            elapsed = time.monotonic() - start
+            size_mb = 0.0
+            try:
+                size_mb = self._pcap_path.stat().st_size / 1_048_576
+            except FileNotFoundError:
+                pass  # file not created yet — normal on first tick
+            print(
+                f"  [monitor] {self._label} — "
+                f"{elapsed:.0f}s elapsed  |  {size_mb:.2f} MB captured",
+                flush=True,
+            )
+
+
+# ---------------------------------------------------------------------------
 # CaptureSession
 # ---------------------------------------------------------------------------
 
@@ -140,7 +188,7 @@ class CaptureSession:
         self,
         interface: str,
         label: str,
-        outdir: str | Path = "~/captures",
+        outdir: str | Path = "/home/ubuntu/captures",
         extra_filter: str = "",
         snaplen: int = 0,
         ring_buffer_mb: Optional[int] = None,
@@ -161,6 +209,7 @@ class CaptureSession:
         self._stop_time: Optional[str] = None
         self._pcap_path: Optional[Path] = None
         self._labels_log: Optional[Path] = None
+        self._monitor: Optional[_CaptureMonitor] = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -224,6 +273,11 @@ class CaptureSession:
         # Give the sniffer a moment to open the socket before the caller
         # starts generating traffic.
         time.sleep(0.5)
+
+        # Start the live progress monitor in a background daemon thread
+        self._monitor = _CaptureMonitor(self._pcap_path, self.label)
+        self._monitor.start()
+
         return self
 
     def stop(self) -> "CaptureSession":
@@ -248,6 +302,13 @@ class CaptureSession:
                 self._proc.kill()
 
         self._stop_time = _utc_now()
+
+        # Stop the monitor thread before printing anything else so its
+        # output does not interleave with the stop/summary messages.
+        if self._monitor:
+            self._monitor.stop()
+            self._monitor = None
+
         # Guard: if start() was never called (or raised before setting _pcap_path)
         # _write_label_event would crash on _pcap_path.name — skip it safely.
         if self._pcap_path is not None:

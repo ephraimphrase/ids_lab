@@ -286,17 +286,25 @@ class FlowExtractor:
         ] + field_args
 
         try:
-            raw = subprocess.check_output(
-                cmd, stderr=subprocess.DEVNULL, text=True, timeout=600
+            # Use Popen to stream the output instead of reading it all into memory
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
             )
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"tshark failed: {e}") from e
+        except OSError as e:
+            raise RuntimeError(f"tshark failed to start: {e}") from e
 
         packets = []
-        for line in raw.splitlines():
-            pkt = self._parse_line(line)
-            if pkt:
-                packets.append(pkt)
+        try:
+            for line in proc.stdout:
+                pkt = self._parse_line(line)
+                if pkt:
+                    packets.append(pkt)
+        finally:
+            proc.stdout.close()
+            proc.wait(timeout=30)
+            if proc.returncode != 0:
+                print(f"  [WARNING] tshark exited with code {proc.returncode}")
+
         return packets
 
     def _parse_line(self, line: str) -> Optional[_Pkt]:

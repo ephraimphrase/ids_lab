@@ -127,12 +127,7 @@ class Verifier:
             result.errors.append(f"pcap file not found: {self.pcap}")
             return result
 
-        result.total_packets = self._count_total_packets()
-        result.syn_only_count = self._count_syn_only(self.attacker_ip)
-        result.unique_dst_ports = self._count_unique_dst_ports(self.attacker_ip)
-        result.http_request_count = self._count_http_requests(self.attacker_ip)
-        result.sql_keyword_count = self._count_sql_keywords(self.attacker_ip)
-        result.ssh_packet_count = self._count_ssh_packets(self.attacker_ip)
+        self._run_single_pass(result)
         result.peak_pps, result.avg_pps = self._compute_pps()
 
         # Auto-verify heuristics (you can tune these thresholds)
@@ -170,79 +165,83 @@ class Verifier:
     # tshark wrappers
     # ------------------------------------------------------------------
 
-    def _run_tshark(self, args: list[str]) -> str:
-        """Run tshark with additional args and return stdout as a string."""
-        cmd = [self._tshark, "-r", str(self.pcap), "-n"] + args
+    def _run_single_pass(self, result: VerificationResult) -> None:
+        """Run a single tshark pass to collect all counting metrics."""
+        fields = [
+            "frame.number",
+            "ip.src",
+            "tcp.flags.syn",
+            "tcp.flags.ack",
+            "tcp.dstport",
+            "http.request",
+            "http.request.uri",
+        ]
+        field_args = []
+        for f in fields:
+            field_args += ["-e", f]
+            
+        cmd = [
+            self._tshark, "-r", str(self.pcap), "-n",
+            "-T", "fields", "-E", "separator=\t", "-E", "header=n"
+        ] + field_args
+
         try:
-            return subprocess.check_output(
-                cmd, stderr=subprocess.DEVNULL, text=True, timeout=120
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
             )
-        except subprocess.CalledProcessError as exc:
-            # Non-zero exit: tshark found no matching packets (exit 2) or had
-            # an error (exit 1).  Return empty string; caller handles zero count.
-            # Print a debug hint so a developer can diagnose filter issues.
-            if exc.returncode not in (1, 2):
-                print(
-                    f"[verify] tshark exited {exc.returncode} for: {' '.join(cmd)}",
-                    flush=True,
-                )
-            return ""
-        except subprocess.TimeoutExpired:
-            print(f"[verify] tshark timed out for: {' '.join(cmd)}", flush=True)
-            return ""
+        except OSError as e:
+            result.errors.append(f"tshark failed to start: {e}")
+            return
 
-    def _count_total_packets(self) -> int:
-        """Total packet count in the pcap."""
-        out = self._run_tshark(["-T", "fields", "-e", "frame.number"])
-        lines = [ln for ln in out.strip().splitlines() if ln.strip()]
-        return len(lines)
-
-    def _count_syn_only(self, src_ip: str) -> int:
-        """Count TCP SYN packets without ACK — the port scan / SYN flood signature."""
-        out = self._run_tshark([
-            "-Y", f"tcp.flags.syn==1 && tcp.flags.ack==0 && ip.src=={src_ip}",
-            "-T", "fields", "-e", "frame.number",
-        ])
-        return len([ln for ln in out.strip().splitlines() if ln.strip()])
-
-    def _count_unique_dst_ports(self, src_ip: str) -> int:
-        """Count distinct destination TCP ports hit by attacker — port scan proof."""
-        out = self._run_tshark([
-            "-Y", f"ip.src=={src_ip} && tcp",
-            "-T", "fields", "-e", "tcp.dstport",
-        ])
-        ports = set(ln.strip() for ln in out.strip().splitlines() if ln.strip())
-        return len(ports)
-
-    def _count_http_requests(self, src_ip: str) -> int:
-        """Count HTTP GET/POST requests from the attacker (brute-force / SQLi)."""
-        out = self._run_tshark([
-            "-Y", f"http.request && ip.src=={src_ip}",
-            "-T", "fields", "-e", "frame.number",
-        ])
-        return len([ln for ln in out.strip().splitlines() if ln.strip()])
-
-    def _count_sql_keywords(self, src_ip: str) -> int:
-        """Count HTTP requests whose URI contains SQL injection keywords."""
-        out = self._run_tshark([
-            "-Y", f"http.request && ip.src=={src_ip}",
-            "-T", "fields", "-e", "http.request.uri",
-        ])
-        uris = out.strip().splitlines()
-        count = 0
-        for uri in uris:
-            upper = uri.upper()
-            if any(kw.upper() in upper for kw in self._SQL_PATTERNS):
-                count += 1
-        return count
-
-    def _count_ssh_packets(self, src_ip: str) -> int:
-        """Count packets on TCP/22 from the attacker — SSH brute-force proof."""
-        out = self._run_tshark([
-            "-Y", f"tcp.port==22 && ip.src=={src_ip}",
-            "-T", "fields", "-e", "frame.number",
-        ])
-        return len([ln for ln in out.strip().splitlines() if ln.strip()])
+        unique_ports = set()
+        
+        try:
+            for line in proc.stdout:
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    continue
+                    
+                # frame.number is always present
+                if parts[0].strip():
+                    result.total_packets += 1
+                
+                src = parts[1].strip()
+                syn = parts[2].strip()
+                ack = parts[3].strip()
+                dstport = parts[4].strip()
+                http_req = parts[5].strip()
+                http_uri = parts[6].strip()
+                
+                if src == self.attacker_ip:
+                    # Some packets might have multiple headers/values comma-separated;
+                    # taking the first one is usually sufficient for our simple signatures.
+                    syn_val = syn.split(',')[0] if syn else "0"
+                    ack_val = ack.split(',')[0] if ack else "0"
+                    
+                    if syn_val == "1" and ack_val == "0":
+                        result.syn_only_count += 1
+                    
+                    if dstport:
+                        port_val = dstport.split(',')[0]
+                        unique_ports.add(port_val)
+                        if port_val == "22":
+                            result.ssh_packet_count += 1
+                            
+                    if http_req:
+                        req_val = http_req.split(',')[0]
+                        if req_val == "1":
+                            result.http_request_count += 1
+                            if http_uri:
+                                upper_uri = http_uri.upper()
+                                if any(kw.upper() in upper_uri for kw in self._SQL_PATTERNS):
+                                    result.sql_keyword_count += 1
+        finally:
+            proc.stdout.close()
+            proc.wait(timeout=30)
+            if proc.returncode not in (0, 1, 2):
+                result.errors.append(f"tshark exited with code {proc.returncode}")
+                
+        result.unique_dst_ports = len(unique_ports)
 
     def _compute_pps(self) -> tuple[float, float]:
         """

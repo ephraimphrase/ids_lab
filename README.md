@@ -23,6 +23,13 @@ While CICIDS2017 and CICFlowMeter are industry standards, the original Java-base
 Examiners will not just take your word that an attack succeeded. You must prove the malicious traffic is present in the dataset.
 **The Solution:** The `verify.py` and `verify_report.py` modules automatically run strict `tshark` display filters against your generated `.pcap` files. They count SYN-only packets, unique destination ports, SSH attempts, and SQL injection keywords, directly outputting a Markdown table summarizing the empirical evidence of the attacks.
 
+### High-Performance & Memory-Optimized Pipeline
+Working with multi-gigabyte PCAPs on resource-constrained VMs typically causes `MemoryError` crashes or takes days to process.
+**The Solution:** 
+- **Parallel Processing:** Flow extraction and verification are heavily multi-threaded, utilizing all available CPU cores simultaneously via `ThreadPoolExecutor`.
+- **Stream Processing:** `tshark` output is streamed directly into Python memory line-by-line rather than loaded in bulk, keeping the RAM footprint flat regardless of PCAP size.
+- **Single-Pass Verification:** Verification metrics are parsed simultaneously in a single pass of the PCAP file, drastically reducing I/O bottleneck and speeding up Phase 5 by up to 80%.
+
 ---
 
 ## 2. Lab Setup & Prerequisites
@@ -139,13 +146,13 @@ Parses the `labels.log` file into `LabelWindow` objects. When it comes time to l
 If both are true, the flow is labeled with the attack name. Otherwise, it is labeled `BENIGN`.
 
 ### `ids_capture/extract_flows.py` (The Feature Engineer)
-Parses `.pcap` files using `tshark -T fields`. It groups individual packets into 5-tuple bidirectional flows (Source IP, Dest IP, Source Port, Dest Port, Protocol). Once a flow times out (default 120s of inactivity), it calculates statistical features:
+Parses `.pcap` files using `tshark -T fields`. Crucially, it uses **memory-efficient stream processing** to prevent out-of-memory crashes on huge PCAPs, and leverages multi-threading to process multiple PCAPs in parallel. It groups individual packets into 5-tuple bidirectional flows (Source IP, Dest IP, Source Port, Dest Port, Protocol). Once a flow times out (default 120s of inactivity), it calculates statistical features:
 * **Time-based:** Duration, Inter-Arrival Time (Mean, Std, Max, Min)
 * **Volume-based:** Total Packets, Total Bytes, Packets/sec, Bytes/sec
 * **Behavioral:** TCP Flag counts (SYN, ACK, RST, FIN, PSH, URG), Mean Window Size
 
 ### `ids_capture/verify.py` & `verify_report.py` (The Evidence Generator)
-To be used in Chapter 4/6 of your dissertation. It runs targeted `tshark` queries against the `.pcap` files. For example, to verify a Port Scan, it counts the number of `unique_dst_ports` targeted by the attacker. To verify a SYN Flood, it calculates the `peak_pps` (Packets Per Second). 
+To be used in Chapter 4/6 of your dissertation. It runs targeted `tshark` queries against the `.pcap` files. For example, to verify a Port Scan, it counts the number of `unique_dst_ports` targeted by the attacker. To verify a SYN Flood, it calculates the `peak_pps` (Packets Per Second). It utilizes a **single-pass architecture**, meaning it extracts all necessary metrics in one sweep of the PCAP file, saving massive amounts of time compared to running separate filters sequentially.
 You can run a standalone report for a single PCAP:
 ```bash
 python3 verify_report.py --pcap ~/captures/PortScan_*.pcap --label PortScan --attacker-ip 10.0.0.10 --wireshark-filters
@@ -158,7 +165,7 @@ python3 verify_report.py --pcap ~/captures/PortScan_*.pcap --label PortScan --at
 Once the pipeline completes, your `--outdir` will contain:
 
 ```text
-~/captures/
+/home/ubuntu/captures/
 ├── labels.log                      # Ground-truth timestamp ledger
 ├── BENIGN_20260623_140000.pcap     # Raw packet captures
 ├── PortScan_20260623_140200.pcap

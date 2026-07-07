@@ -34,6 +34,8 @@ import os
 import signal
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
@@ -272,7 +274,7 @@ def run_verification(
     outdir: Path,
     attacker_ip: str,
 ) -> list[VerificationResult]:
-    _print_banner("PHASE 5 — Verification")
+    _print_banner("PHASE 5 — Verification (parallel)")
     labels_log = outdir / "labels.log"
     if not labels_log.exists():
         print("[WARNING] labels.log not found — skipping verification.")
@@ -281,19 +283,25 @@ def run_verification(
     log = LabelsLog(labels_log)
     print(log.summary())
 
-    results = []
-    for pcap_file in sorted(outdir.glob("*.pcap")):
-        # Determine label from filename prefix
+    pcap_files = sorted(outdir.glob("*.pcap"))
+    if not pcap_files:
+        print("[WARNING] No pcap files found — nothing to verify.")
+        return []
+
+    # ------------------------------------------------------------------
+    # Build one Verifier per pcap, then run all checks in parallel.
+    # Each tshark call is an independent subprocess so there is no shared
+    # mutable state — ThreadPoolExecutor is safe here.
+    # ------------------------------------------------------------------
+    def _verify_one(pcap_file: Path) -> VerificationResult:
         label_guess = pcap_file.stem.split("_")[0]
-        # Find time window from labels log
         matching = [w for w in log.windows if w.label == label_guess]
         time_window = (
             f"{matching[0].start.strftime('%H:%M')} – "
             f"{matching[0].stop.strftime('%H:%M') if matching[0].stop else '?'}"
             if matching else "unknown"
         )
-
-        print(f"\n  Verifying: {pcap_file.name} …", flush=True)
+        print(f"  [verify] Starting: {pcap_file.name}", flush=True)
         v = Verifier(
             pcap_path=pcap_file,
             label=label_guess,
@@ -301,8 +309,28 @@ def run_verification(
             time_window=time_window,
         )
         result = v.run_all_checks()
-        print(result.summary())
-        results.append(result)
+        print(f"  [verify] Done:     {pcap_file.name}", flush=True)
+        return result
+
+    # Use min(cpu_count, num_files) workers — no benefit spawning more
+    # threads than files.
+    max_workers = min(os.cpu_count() or 4, len(pcap_files))
+    print(f"  Running {len(pcap_files)} verifications across {max_workers} threads …\n")
+
+    results_map: dict[str, VerificationResult] = {}
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="verify") as pool:
+        future_to_pcap = {pool.submit(_verify_one, p): p for p in pcap_files}
+        for future in as_completed(future_to_pcap):
+            pcap = future_to_pcap[future]
+            try:
+                result = future.result()
+                results_map[pcap.name] = result
+                print(result.summary())
+            except Exception as exc:
+                print(f"  [ERROR] Verification failed for {pcap.name}: {exc}")
+
+    # Preserve original sorted order in the final list
+    results = [results_map[p.name] for p in pcap_files if p.name in results_map]
 
     if results:
         table = Verifier.build_markdown_table(results)
@@ -321,15 +349,28 @@ def run_flow_extraction(
     outdir: Path,
     attacker_ip: str,
 ) -> Path:
-    _print_banner("PHASE 7 — Flow Extraction & Labelling")
+    _print_banner("PHASE 7 — Flow Extraction & Labelling (parallel)")
     labels_log = outdir / "labels.log"
     log = LabelsLog(labels_log) if labels_log.exists() else None
 
-    all_dfs = []
-    for pcap_file in sorted(outdir.glob("*.pcap")):
+    pcap_files = sorted(outdir.glob("*.pcap"))
+    if not pcap_files:
+        print("[WARNING] No pcap files found in outdir — nothing to extract.")
+        master_path = outdir / "ids_dataset.csv"
+        return master_path
+
+    # ------------------------------------------------------------------
+    # Each FlowExtractor spawns its own tshark subprocess and writes its
+    # own _flows.csv — completely independent.  We use a lock only for
+    # the labels.log read (LabelsLog is stateless after parsing, so the
+    # lock is just a safeguard for future changes).
+    # ------------------------------------------------------------------
+    _log_lock = threading.Lock()
+
+    def _extract_one(pcap_file: Path) -> pd.DataFrame:
         label_guess = pcap_file.stem.split("_")[0]
         csv_path = outdir / f"{pcap_file.stem}_flows.csv"
-        print(f"  Extracting flows: {pcap_file.name} …")
+        print(f"  [extract] Starting: {pcap_file.name}", flush=True)
 
         extractor = FlowExtractor(
             pcap_path=pcap_file,
@@ -337,20 +378,40 @@ def run_flow_extraction(
         )
         df = extractor.extract()
 
-        if log:
-            df = log.label_flows(df, attacker_ip=attacker_ip)
-        else:
-            # No labels.log — use the filename label for everything
-            df["label"] = label_guess
+        if df.empty:
+            return df
 
-        all_dfs.append(df)
+        with _log_lock:
+            if log:
+                df = log.label_flows(df, attacker_ip=attacker_ip)
+            else:
+                df["label"] = label_guess
 
-    if not all_dfs:
-        print("[WARNING] No pcap files found in outdir — nothing to extract.")
+        print(f"  [extract] Done:     {pcap_file.name}  ({len(df):,} rows)", flush=True)
+        return df
+
+    max_workers = min(os.cpu_count() or 4, len(pcap_files))
+    print(f"  Extracting {len(pcap_files)} PCAPs across {max_workers} threads …\n")
+
+    all_dfs: list[pd.DataFrame] = [None] * len(pcap_files)  # pre-allocate slots
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="extract") as pool:
+        future_to_idx = {pool.submit(_extract_one, p): i for i, p in enumerate(pcap_files)}
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                all_dfs[idx] = future.result()
+            except Exception as exc:
+                print(f"  [ERROR] Extraction failed for {pcap_files[idx].name}: {exc}")
+                all_dfs[idx] = pd.DataFrame()
+
+    # Filter out empty frames before concat
+    non_empty = [df for df in all_dfs if df is not None and not df.empty]
+    if not non_empty:
+        print("[WARNING] All extractions produced empty DataFrames.")
         master_path = outdir / "ids_dataset.csv"
-        return master_path  # return expected type even when empty
+        return master_path
 
-    master = pd.concat(all_dfs, ignore_index=True)
+    master = pd.concat(non_empty, ignore_index=True)
     master_path = outdir / "ids_dataset.csv"
     master.to_csv(master_path, index=False)
 
@@ -388,8 +449,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--outdir",
-        default="~/captures",
-        help="Output directory for pcap, labels.log, CSVs [default: ~/captures]",
+        default="/home/ubuntu/captures",
+        help="Output directory for pcap, labels.log, CSVs [default: /home/ubuntu/captures]",
     )
     p.add_argument(
         "--benign-duration",
