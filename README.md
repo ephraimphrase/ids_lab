@@ -105,9 +105,9 @@ That's your cue to switch to the **Kali VM** and type the matching command yours
 | **SSHBruteForce** | `hydra -l labuser -P /tmp/pass.txt ssh://10.0.0.20` |
 | **WebBruteForce** | `hydra 10.0.0.20 http-get-form '/vulnerabilities/brute/:username=^USER^&password=^PASS^&Login=Login:H=Cookie\: PHPSESSID=PASTE_COOKIE_HERE; security=low:Username and/or password incorrect' -l admin -P /tmp/pass.txt` |
 | **SQLInjection** | `sqlmap -u 'http://10.0.0.20/vulnerabilities/sqli/?id=1&Submit=Submit' --cookie='PHPSESSID=PASTE_COOKIE_HERE; security=low' --batch --dbs` |
-| **DoSSYNFlood** | `sudo hping3 -S --flood -p 80 -c 500000 10.0.0.20` |
-| **DoSUDPFlood** | `sudo hping3 --udp --flood -p 80 -c 500000 10.0.0.20` |
-| **DDoSSYNFlood** | `sudo hping3 -S --flood --rand-source -p 80 -c 200000 10.0.0.20 & sudo hping3 -S --flood --rand-source -p 443 -c 200000 10.0.0.20 & sudo hping3 -S --flood --rand-source -p 22 -c 100000 10.0.0.20 & wait` |
+| **DoSSYNFlood** | `sudo hping3 -S --flood -p 80 -c 20000 10.0.0.20` |
+| **DoSUDPFlood** | `sudo hping3 --udp --flood -p 80 -c 20000 10.0.0.20` |
+| **DDoSSYNFlood** | `sudo hping3 -S --flood --rand-source -p 80 -c 10000 10.0.0.20 & sudo hping3 -S --flood --rand-source -p 443 -c 10000 10.0.0.20 & sudo hping3 -S --flood --rand-source -p 22 -c 5000 10.0.0.20 & wait` |
 
 **Before you start, set up on Kali:**
 - `nmap`, `hydra`, `sqlmap`, and `hping3` ship with Kali by default — nothing to install there.
@@ -143,7 +143,7 @@ sudo python3 capture_benign.py --interface ens33 --extra-filter "icmp and host 1
 sudo python3 capture_portscan.py --interface ens33 --extra-filter "host 10.0.0.10"
 ```
 
-**Capture a DoS attack** (SYN flood by default; add `--type udp` for a UDP flood):
+**Capture a DoS attack** (SYN flood by default, capped at 20,000 packets; add `--type udp` for a UDP flood):
 ```bash
 sudo python3 capture_dos.py --interface ens33 --outdir /home/ubuntu/captures --extra-filter "host 10.0.0.10"
 ```
@@ -233,8 +233,8 @@ Once the pipeline completes, your `--outdir` will contain:
 
 | Issue | Solution |
 |-------|----------|
-| **When to stop the capture** | In interactive mode there is no capture timer — it runs until you press ENTER, regardless of `default_duration` (that value is only used in `--auto` mode). Don't press ENTER until the attack command has fully returned to your Kali shell prompt. For **PortScan**, the three chained `nmap` invocations can keep running (especially `-sV`) well after the visible output looks finished — wait for the prompt, not the scrollback. For **DoS/DDoS**, `hping3` needs `--flood` (see below) or it defaults to 1 packet/second and 500,000 packets would take days — with `--flood` added it should finish sending well inside the 30s window; watch for hping3's own summary stats to print before stopping. |
-| **DoS/DDoS attack "never finishes" or barely generates any traffic** | `hping3` defaults to **1 packet per second** unless you pass `--flood` (or `--faster`/`-i`). Without it, `-c 500000` would take ~5.8 days to send, not a flood. All the DoS/DDoS commands in this doc and in `run_experiment.py`/`capture_dos.py`/`capture_ddos.py` now include `--flood`; if you're running a command from memory or an older note, add `--flood` explicitly. |
+| **When to stop the capture** | In interactive mode there is no capture timer — it runs until you press ENTER, regardless of `default_duration` (that value is only used in `--auto` mode). Don't press ENTER until the attack command has fully returned to your Kali shell prompt. For **PortScan**, the three chained `nmap` invocations can keep running (especially `-sV`) well after the visible output looks finished — wait for the prompt, not the scrollback. For **DoS/DDoS**, `hping3` needs `--flood` (see below) — with it, the packet caps below finish in well under a second on a LAN; watch for hping3's own summary stats to print before stopping. |
+| **DoS/DDoS attack "never finishes" or barely generates any traffic** | `hping3` defaults to **1 packet per second** unless you pass `--flood` (or `--faster`/`-i`). Without it, even the current, deliberately modest `-c 20000` cap would take over 5 hours to send, not a flood. All the DoS/DDoS commands in this doc and in `run_experiment.py`/`capture_dos.py`/`capture_ddos.py` now include `--flood`; if you're running a command from memory or an older note, add `--flood` explicitly. Packet counts were also scaled down from the original dissertation-sized defaults (500,000 / 200,000) to 20,000 / 10,000 for a smaller-scope project — edit `ATTACK_PHASES` in `run_experiment.py` (or the `-c` values in `capture_dos.py`/`capture_ddos.py`) if you want them larger or smaller. |
 | **Wrong Interface Name** | Do not assume `eth0`. VirtualBox uses `enp0s3`, VMware uses `ens33`. Run `ip a` or run the script with no arguments to list valid interfaces. |
 | **Zero-packet PCAPs** | Ensure `dumpcap` has correct permissions. Run the orchestrator with `sudo`. |
 | **Clock Drift** | If your PCAP timestamps don't match your `labels.log`, your VM clocks are drifting. Install VirtualBox Guest Additions/VMware Tools on both VMs to sync time with the host. |

