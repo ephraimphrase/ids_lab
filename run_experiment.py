@@ -249,9 +249,11 @@ def run_attacks(
             label=label,
             outdir=outdir,
             extra_filter=extra_filter,
-            # For DoS: cap file size to avoid filling disk
-            ring_buffer_mb=512 if "Flood" in label or "DoS" in label else None,
-            # Hard packet cap for SYN flood
+            # No ring_buffer_mb here: dumpcap's -b ring-buffer mode renames the
+            # output file (appends _00001_<timestamp>), which desyncs it from
+            # the path CaptureSession tracks and reports on. max_packets alone
+            # (via dumpcap's own -c) already bounds worst-case disk usage to a
+            # few tens of MB, so the ring buffer was redundant anyway.
             max_packets=600_000 if "Flood" in label else None,
         ) as cap:
             if auto:

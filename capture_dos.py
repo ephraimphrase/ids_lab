@@ -356,9 +356,10 @@ def main():
         label=label,
         outdir=outdir,
         extra_filter=args.extra_filter,
-        # Ring-buffer capped at 512 MB to prevent disk exhaustion during floods
-        ring_buffer_mb=512,
-        # Hard packet cap to prevent runaway captures
+        # No ring_buffer_mb: dumpcap's -b ring-buffer mode renames the output
+        # file (appends _00001_<timestamp>), desyncing it from the path this
+        # script reports on. max_packets alone already bounds disk usage to a
+        # few tens of MB via dumpcap's own -c.
         max_packets=600_000,
     ) as cap:
         if args.duration > 0:
