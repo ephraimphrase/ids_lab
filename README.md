@@ -86,8 +86,37 @@ sudo python3 run_experiment.py \
 
 The script will pause and prompt you at each step. When prompted, switch to your Kali VM, run the relevant attack, and press ENTER on the Victim VM when the attack finishes. The script manages the precise UTC timestamps in `labels.log`.
 
+### Manually Running the Attacks from Kali (Interactive Mode)
+
+In the default (non-`--auto`) mode, `run_experiment.py` does **not** touch your Kali VM at all — it only manages the capture on the Victim side. At each attack phase it prints something like:
+
+```
+Attack: PortScan  (nmap SYN + TCP connect + version scans)
+  Start 'PortScan' capture? [ENTER=yes / skip]:
+  [Capture running]  Run 'nmap SYN + TCP connect + version scans' from Kali now.
+  Press ENTER when attack is complete:
+```
+
+That's your cue to switch to the **Kali VM** and type the matching command yourself, then switch back to the Victim VM and press ENTER once it finishes. The exact commands the script expects for each phase (taken straight from its internal `ATTACK_PHASES` definitions) are, using this doc's example IPs (attacker `10.0.0.10`, victim `10.0.0.20`):
+
+| Attack | Command to run on Kali |
+|---|---|
+| **PortScan** | `sudo nmap -sS -p 1-1024 10.0.0.20 && nmap -sT -p 1-1000 10.0.0.20 && sudo nmap -sV 10.0.0.20` |
+| **SSHBruteForce** | `hydra -l labuser -P /tmp/pass.txt ssh://10.0.0.20` |
+| **WebBruteForce** | `hydra 10.0.0.20 http-get-form '/vulnerabilities/brute/:username=^USER^&password=^PASS^&Login=Login:Username and/or password incorrect:H=Cookie: PHPSESSID=<your_cookie>; security=low' -l admin -P /tmp/pass.txt` |
+| **SQLInjection** | `sqlmap -u 'http://10.0.0.20/vulnerabilities/sqli/?id=1&Submit=Submit' --cookie='PHPSESSID=<your_cookie>; security=low' --batch --dbs` |
+| **DoSSYNFlood** | `sudo hping3 -S -p 80 -c 500000 10.0.0.20` |
+| **DoSUDPFlood** | `sudo hping3 --udp -p 80 -c 500000 10.0.0.20` |
+| **DDoSSYNFlood** | `sudo hping3 -S --rand-source -p 80 -c 200000 10.0.0.20 & sudo hping3 -S --rand-source -p 443 -c 200000 10.0.0.20 & sudo hping3 -S --rand-source -p 22 -c 100000 10.0.0.20 & wait` |
+
+**Before you start, set up on Kali:**
+- `nmap`, `hydra`, `sqlmap`, and `hping3` ship with Kali by default — nothing to install there.
+- Create `/tmp/pass.txt`, a small wordlist that **includes the real password** for `labuser` (SSH) and `admin` (DVWA). If the correct password isn't in the list, hydra never succeeds and Phase 5 verification will report the attack as unverified even though traffic was generated.
+- `labuser` must exist as an actual SSH-enabled account on the Victim VM.
+- Log into DVWA in a browser first (Security level set to **Low** — see the troubleshooting table below), then copy the `PHPSESSID` cookie value from your browser's dev tools and substitute it for `<your_cookie>` in the WebBruteForce/SQLInjection commands.
+
 ### Automated Execution
-If you have configured SSH keys between the machines, you can automate the timing:
+`--auto` mode skips the manual Kali step by running each phase's attack command as a **local subprocess on whichever machine is running `run_experiment.py`** — it does not SSH anywhere, despite the tool's docstring mentioning SSH. Concretely:
 
 ```bash
 sudo python3 run_experiment.py \
@@ -98,6 +127,8 @@ sudo python3 run_experiment.py \
     --auto \
     --phpsessid "your_dvwa_cookie"
 ```
+
+For this to actually reproduce the two-VM attacker/victim design, `nmap`, `hydra`, `sqlmap`, and `hping3` would need to be installed **on the Victim VM itself**, and the traffic would effectively be self-targeted (loopback-style) rather than arriving from a separate Kali box over the wire — which changes what your capture actually proves. For a genuine dissertation-grade dataset with attacks visibly arriving from a distinct attacker IP, use **interactive mode** (above) with a real, separate Kali VM. Treat `--auto` as a convenience for smoke-testing the pipeline itself, not for generating your real dataset.
 
 ### Standalone Targeted Captures
 If you only want to capture a single specific event (like an ICMP ping or a single port scan) rather than the whole pipeline, use these simplified scripts:
@@ -131,6 +162,27 @@ sudo python3 capture_ddos.py --interface ens33 --outdir /home/ubuntu/captures --
 | **Phase 4: Attacks** | Captures individual attacks: PortScan, SSH Brute Force, Web Brute Force, SQL Injection, DoS SYN Flood, DoS UDP Flood, and DDoS SYN Flood. | `<Attack>_<ts>.pcap` |
 | **Phase 5: Verification** | Cross-references the PCAPs with the timestamp log, applying heuristic filters to prove the attack traffic exists. | `verification_table.md` |
 | **Phase 7: Extraction** | Parses all PCAPs, aggregates bidirectional flows, calculates ML features, and applies labels based on `labels.log`. | `ids_dataset.csv` |
+
+### Full CLI Reference (`run_experiment.py`)
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--interface`, `-i` | *(none — lists interfaces and exits)* | Capture interface, e.g. `ens33` |
+| `--attacker-ip` | `10.0.0.10` | Kali's IP — used for filtering and flow labelling |
+| `--victim-ip` | `10.0.0.20` | This machine's IP — only used to build `--auto` attack commands |
+| `--outdir` | `/home/ubuntu/captures` | Where pcaps, `labels.log`, and CSVs are written |
+| `--benign-duration` | `0` (wait for ENTER) | Seconds to capture Phase 3 benign traffic; `0` prompts you to stop manually |
+| `--extra-filter` | *(none)* | BPF capture filter applied to every capture, e.g. `"host 10.0.0.10"` |
+| `--auto` | off | Run attack commands automatically instead of prompting — see caveats above |
+| `--phpsessid` | `changeme` | DVWA session cookie substituted into the WebBruteForce/SQLInjection `--auto` commands |
+| `--skip-benign` | off | Skip Phase 3 entirely |
+| `--skip-attacks` | off | Skip Phase 4 entirely |
+| `--skip-verify` | off | Skip Phase 5 entirely |
+| `--skip-extract` | off | Skip Phase 7 entirely |
+| `--verify-only` | off | Run **only** Phase 5 against pcaps already in `--outdir` — useful for re-verifying without recapturing |
+| `--extract-only` | off | Run **only** Phase 7 against pcaps already in `--outdir` — useful for re-extracting after a bug fix without recapturing |
+
+`--skip-*` and `--verify-only`/`--extract-only` are the fast path when you're iterating on a bug in the extraction or verification code (as opposed to the capture itself) — you don't need to re-run the whole attack sequence every time.
 
 ---
 
@@ -186,5 +238,6 @@ Once the pipeline completes, your `--outdir` will contain:
 | **Clock Drift** | If your PCAP timestamps don't match your `labels.log`, your VM clocks are drifting. Install VirtualBox Guest Additions/VMware Tools on both VMs to sync time with the host. |
 | **Internet Leakage** | If your `BENIGN` traffic is full of random internet scans, your VM is exposed. Set your hypervisor network adapter to **Internal Network** or **Host-Only**. |
 | **Missing Flow Labels** | Ensure you provided the correct `--attacker-ip`. If the IP in the script doesn't match the Kali VM's actual IP, `labels.py` will classify the attacks as `BENIGN`. |
-| **DVWA Attacks Failing** | Set DVWA Security Level to **Low**. For Hydra, ensure you are attacking `/vulnerabilities/brute/` and passing the correct `PHPSESSID` cookie. |
-| **Permission Denied opening PCAPs** | Because the script runs with `sudo`, using `~/captures` saves files to `/root/captures/`. Use an absolute path like `/home/ubuntu/captures` instead to keep files accessible to your normal user. |
+| **Hydra/sqlmap Attacks "Failing" (0 hits in verification)** | Verification only passes if the credential in `/tmp/pass.txt` is actually correct — hydra/sqlmap running without ever succeeding still generates plenty of *traffic*, but `verify.py`'s heuristics key off request/packet counts, not login success. Set DVWA Security Level to **Low**, attack `/vulnerabilities/brute/`, and double-check the `PHPSESSID` cookie is current (it rotates on new sessions). |
+| **Permission Denied opening PCAPs** | Because the script runs with `sudo`, every file it writes is root-owned. `run_experiment.py` now automatically hands `--outdir` back to the user who invoked `sudo` (via `SUDO_UID`/`SUDO_GID`) once it exits — success, early exit, or crash. This only fires when the process actually runs under `sudo`; if you still hit this, check you didn't pass `--outdir ~/captures` (which resolves to `/root/captures`, undoable by `chmod` alone since `/root` itself blocks non-root traversal) and that the process didn't get killed with `SIGKILL` (which skips the `finally` cleanup) — in that case, manually run `sudo chown -R $(whoami):$(whoami) <outdir>`. |
+| **tshark fails with a specific exit code during Phase 5/7** | `extract_flows.py` and `verify.py` now include tshark's own `stderr` message in the warning instead of just the bare exit code. Two codes worth knowing: **3** = "isn't a capture file in a format TShark understands" (the pcap's header itself is corrupt/garbled — not just cut short); **14** = "cut short in the middle of a packet" (a genuinely truncated file, e.g. from an unclean kill). Run `file <pcap>` and `capinfos <pcap>` on the VM to inspect a suspect file directly. |
