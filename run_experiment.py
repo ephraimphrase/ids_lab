@@ -156,6 +156,26 @@ def _prompt_continue(prompt: str = "Press ENTER when ready, or 'skip' to skip: "
         return False
 
 
+def _restore_ownership(outdir: Path) -> None:
+    """When invoked via 'sudo python3 run_experiment.py', every file this
+    process writes is owned by root regardless of --outdir, which locks the
+    invoking user out of their own captures once the script exits. sudo
+    exports SUDO_UID/SUDO_GID for exactly this handoff — use them to give
+    the outdir back to whoever ran sudo."""
+    if sys.platform == "win32" or os.geteuid() != 0:
+        return
+    uid, gid = os.environ.get("SUDO_UID"), os.environ.get("SUDO_GID")
+    if not uid or not gid:
+        return
+    uid, gid = int(uid), int(gid)
+    paths = [outdir] + list(outdir.rglob("*"))
+    for p in paths:
+        try:
+            os.chown(p, uid, gid)
+        except OSError:
+            pass
+
+
 def _check_prerequisites() -> None:
     """Warn if required tools are missing."""
     needed = ["dumpcap", "tshark"]
@@ -536,46 +556,52 @@ def main() -> None:
     print(f"  Mode       : {'AUTO' if args.auto else 'INTERACTIVE'}")
     print(f"{'='*60}\n")
 
-    # ------------------------------------------------------------------
-    # verify-only / extract-only shortcuts
-    # ------------------------------------------------------------------
-    if args.verify_only:
-        run_verification(outdir, args.attacker_ip)
-        return
+    try:
+        # ------------------------------------------------------------------
+        # verify-only / extract-only shortcuts
+        # ------------------------------------------------------------------
+        if args.verify_only:
+            run_verification(outdir, args.attacker_ip)
+            return
 
-    if args.extract_only:
-        run_flow_extraction(outdir, args.attacker_ip)
-        return
+        if args.extract_only:
+            run_flow_extraction(outdir, args.attacker_ip)
+            return
 
-    # ------------------------------------------------------------------
-    # Normal pipeline
-    # ------------------------------------------------------------------
-    if not args.skip_benign:
-        run_benign(args.interface, outdir, args.benign_duration, args.extra_filter)
+        # ------------------------------------------------------------------
+        # Normal pipeline
+        # ------------------------------------------------------------------
+        if not args.skip_benign:
+            run_benign(args.interface, outdir, args.benign_duration, args.extra_filter)
 
-    if not args.skip_attacks:
-        run_attacks(
-            interface=args.interface,
-            outdir=outdir,
-            attacker_ip=args.attacker_ip,
-            victim_ip=args.victim_ip,
-            auto=args.auto,
-            phpsessid=args.phpsessid,
-            extra_filter=args.extra_filter,
-        )
+        if not args.skip_attacks:
+            run_attacks(
+                interface=args.interface,
+                outdir=outdir,
+                attacker_ip=args.attacker_ip,
+                victim_ip=args.victim_ip,
+                auto=args.auto,
+                phpsessid=args.phpsessid,
+                extra_filter=args.extra_filter,
+            )
 
-    if not args.skip_verify:
-        run_verification(outdir, args.attacker_ip)
+        if not args.skip_verify:
+            run_verification(outdir, args.attacker_ip)
 
-    if not args.skip_extract:
-        run_flow_extraction(outdir, args.attacker_ip)
+        if not args.skip_extract:
+            run_flow_extraction(outdir, args.attacker_ip)
 
-    _print_banner("Pipeline complete!")
-    print(f"  All outputs saved to: {outdir}")
-    print("  Next steps:")
-    print("    1. Review verification_table.md")
-    print("    2. Load ids_dataset.csv into your ML notebook")
-    print("    3. Run Suricata: suricata -r <pcap> -l ./suricata_logs/")
+        _print_banner("Pipeline complete!")
+        print(f"  All outputs saved to: {outdir}")
+        print("  Next steps:")
+        print("    1. Review verification_table.md")
+        print("    2. Load ids_dataset.csv into your ML notebook")
+        print("    3. Run Suricata: suricata -r <pcap> -l ./suricata_logs/")
+    finally:
+        # Runs on success, early return (verify/extract-only), or a mid-run
+        # crash/Ctrl+C — whatever got captured so far should stay usable
+        # without sudo.
+        _restore_ownership(outdir)
 
 
 if __name__ == "__main__":
