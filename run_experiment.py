@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -158,7 +159,7 @@ def _prompt_continue(prompt: str = "Press ENTER when ready, or 'skip' to skip: "
 def _check_prerequisites() -> None:
     """Warn if required tools are missing."""
     needed = ["dumpcap", "tshark"]
-    missing = [t for t in needed if not subprocess.which(t)]
+    missing = [t for t in needed if not shutil.which(t)]
     if missing:
         print(
             f"[WARNING] Missing tools: {missing}\n"
