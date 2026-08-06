@@ -7,11 +7,13 @@ Two modes are supported via --type:
 
   syn  — TCP SYN Flood (default): attacker hammers a port with SYN packets
           but never completes the handshake, exhausting the victim's connection table.
-          Tool: sudo hping3 -S --flood -p 80 -c 20000 <victim_ip>
+          Tool: sudo timeout -s INT 2 hping3 -S --flood -p 80 <victim_ip>
+          (hping3's -c count is ignored in --flood mode, so 'timeout' bounds
+          the attack duration instead -- see README troubleshooting table.)
 
   udp  — UDP Flood: attacker sends raw UDP datagrams at maximum rate,
           exhausting bandwidth and CPU without requiring a TCP handshake.
-          Tool: sudo hping3 --udp --flood -p 80 -c 20000 <victim_ip>
+          Tool: sudo timeout -s INT 2 hping3 --udp --flood -p 80 <victim_ip>
 
 Run this script on the VICTIM VM BEFORE starting the attack on the Attacker VM.
 
@@ -333,10 +335,10 @@ def main():
     # Determine the label and attack hint based on the chosen type
     if args.type == "udp":
         label = "DoSUDPFlood"
-        attack_hint = "sudo hping3 --udp --flood -p 80 -c 20000 <victim_ip>"
+        attack_hint = "sudo timeout -s INT 2 hping3 --udp --flood -p 80 <victim_ip>"
     else:
         label = "DoSSYNFlood"
-        attack_hint = "sudo hping3 -S --flood -p 80 -c 20000 <victim_ip>"
+        attack_hint = "sudo timeout -s INT 2 hping3 -S --flood -p 80 <victim_ip>"
 
     print("\n============================================================")
     print(f"  DOS CAPTURE  [{label}]")

@@ -16,13 +16,16 @@ SYN packets from hundreds of different IP addresses at high volume.
 On your Attacker VM (Kali), run the following commands in parallel before pressing
 ENTER on this script:
 
-    sudo hping3 -S --flood --rand-source -p 80  -c 10000 <victim_ip> &
-    sudo hping3 -S --flood --rand-source -p 443 -c 10000 <victim_ip> &
-    sudo hping3 -S --flood --rand-source -p 22  -c 5000 <victim_ip> &
+    sudo timeout -s INT 2 hping3 -S --flood --rand-source -p 80  <victim_ip> &
+    sudo timeout -s INT 2 hping3 -S --flood --rand-source -p 443 <victim_ip> &
+    sudo timeout -s INT 2 hping3 -S --flood --rand-source -p 22  <victim_ip> &
     wait
 
 This hits three ports simultaneously from random sources, generating the
 multi-source, multi-port signature characteristic of a DDoS attack.
+Note: hping3's -c (packet count) option is ignored in --flood mode, so each
+stream is bounded with 'timeout -s INT 2' instead -- adjust the '2' if you
+want a longer/shorter burst.
 
 Run this script on the VICTIM VM BEFORE starting the attack on the Attacker VM.
 
@@ -348,9 +351,9 @@ def main():
         print(f"  BPF Filter: {args.extra_filter}")
     print()
     print("  On your Attacker VM (Kali), run ALL of these at once:")
-    print("      sudo hping3 -S --flood --rand-source -p 80  -c 10000 <victim_ip> &")
-    print("      sudo hping3 -S --flood --rand-source -p 443 -c 10000 <victim_ip> &")
-    print("      sudo hping3 -S --flood --rand-source -p 22  -c 5000 <victim_ip> &")
+    print("      sudo timeout -s INT 2 hping3 -S --flood --rand-source -p 80  <victim_ip> &")
+    print("      sudo timeout -s INT 2 hping3 -S --flood --rand-source -p 443 <victim_ip> &")
+    print("      sudo timeout -s INT 2 hping3 -S --flood --rand-source -p 22  <victim_ip> &")
     print("      wait")
     print()
     print("  NOTE: '--rand-source' spoofs the source IP, so filtering by")

