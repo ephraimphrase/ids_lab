@@ -288,7 +288,7 @@ class FlowExtractor:
         try:
             # Use Popen to stream the output instead of reading it all into memory
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
             )
         except OSError as e:
             raise RuntimeError(f"tshark failed to start: {e}") from e
@@ -301,9 +301,14 @@ class FlowExtractor:
                     packets.append(pkt)
         finally:
             proc.stdout.close()
+            stderr_out = proc.stderr.read()
+            proc.stderr.close()
             proc.wait(timeout=30)
             if proc.returncode != 0:
-                print(f"  [WARNING] tshark exited with code {proc.returncode}")
+                msg = f"  [WARNING] tshark exited with code {proc.returncode}"
+                if stderr_out.strip():
+                    msg += f": {stderr_out.strip()}"
+                print(msg)
 
         return packets
 

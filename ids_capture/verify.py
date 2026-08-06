@@ -165,6 +165,31 @@ class Verifier:
     # tshark wrappers
     # ------------------------------------------------------------------
 
+    def _run_tshark(self, args: list[str]) -> str:
+        """Run tshark with additional args and return stdout as a string.
+        Used by _compute_pps for '-z io,stat' style queries that _run_single_pass
+        does not cover."""
+        cmd = [self._tshark, "-r", str(self.pcap), "-n"] + args
+        try:
+            proc = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            print(f"[verify] tshark timed out for: {' '.join(cmd)}", flush=True)
+            return ""
+        if proc.returncode not in (0, 1, 2):
+            # Non-1/2 exit means a real failure (bad file, bad filter, etc.)
+            # rather than "no matching packets" — surface tshark's own message.
+            stderr = proc.stderr.strip()
+            print(
+                f"[verify] tshark exited {proc.returncode} for: {' '.join(cmd)}"
+                + (f"\n  stderr: {stderr}" if stderr else ""),
+                flush=True,
+            )
+            return ""
+        return proc.stdout
+
     def _run_single_pass(self, result: VerificationResult) -> None:
         """Run a single tshark pass to collect all counting metrics."""
         fields = [
@@ -187,7 +212,7 @@ class Verifier:
 
         try:
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
             )
         except OSError as e:
             result.errors.append(f"tshark failed to start: {e}")
@@ -237,10 +262,15 @@ class Verifier:
                                     result.sql_keyword_count += 1
         finally:
             proc.stdout.close()
+            stderr_out = proc.stderr.read()
+            proc.stderr.close()
             proc.wait(timeout=30)
             if proc.returncode not in (0, 1, 2):
-                result.errors.append(f"tshark exited with code {proc.returncode}")
-                
+                msg = f"tshark exited with code {proc.returncode}"
+                if stderr_out.strip():
+                    msg += f": {stderr_out.strip()}"
+                result.errors.append(msg)
+
         result.unique_dst_ports = len(unique_ports)
 
     def _compute_pps(self) -> tuple[float, float]:
