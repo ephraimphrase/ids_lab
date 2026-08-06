@@ -161,7 +161,17 @@ def _restore_ownership(outdir: Path) -> None:
     process writes is owned by root regardless of --outdir, which locks the
     invoking user out of their own captures once the script exits. sudo
     exports SUDO_UID/SUDO_GID for exactly this handoff — use them to give
-    the outdir back to whoever ran sudo."""
+    the outdir back to whoever ran sudo.
+
+    Also relaxes the mode to world-readable. dumpcap creates capture files
+    as mode 600, and chown alone doesn't touch that. Critically, dumpcap has
+    Linux file capabilities set (cap_net_raw/cap_net_admin) for non-root
+    capture -- per POSIX capability-exec rules, running it as root then
+    computes its capability set from those file capabilities rather than
+    granting full root, so it ends up as EUID 0 *without* CAP_DAC_OVERRIDE.
+    A later 'sudo tshark -r <pcap>' is therefore just as subject to normal
+    permission bits as any non-owning user would be, and a 600 file owned
+    by someone else (post-chown) gets rejected outright."""
     if sys.platform == "win32" or os.geteuid() != 0:
         return
     uid, gid = os.environ.get("SUDO_UID"), os.environ.get("SUDO_GID")
@@ -172,6 +182,7 @@ def _restore_ownership(outdir: Path) -> None:
     for p in paths:
         try:
             os.chown(p, uid, gid)
+            p.chmod(0o755 if p.is_dir() else 0o644)
         except OSError:
             pass
 
