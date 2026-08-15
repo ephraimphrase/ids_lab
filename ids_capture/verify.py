@@ -30,6 +30,17 @@ from typing import Optional
 
 
 # ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+def _is_true(s: str) -> bool:
+    """tshark renders boolean fields (tcp.flags.syn, http.request, ...) as
+    "1"/"0" on some builds and "True"/"False" on others -- accept both so
+    verification doesn't silently zero out on the latter."""
+    return s.strip().lower() in ("1", "true")
+
+
+# ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
@@ -242,19 +253,19 @@ class Verifier:
                     # taking the first one is usually sufficient for our simple signatures.
                     syn_val = syn.split(',')[0] if syn else "0"
                     ack_val = ack.split(',')[0] if ack else "0"
-                    
-                    if syn_val == "1" and ack_val == "0":
+
+                    if _is_true(syn_val) and not _is_true(ack_val):
                         result.syn_only_count += 1
-                    
+
                     if dstport:
                         port_val = dstport.split(',')[0]
                         unique_ports.add(port_val)
                         if port_val == "22":
                             result.ssh_packet_count += 1
-                            
+
                     if http_req:
                         req_val = http_req.split(',')[0]
-                        if req_val == "1":
+                        if _is_true(req_val):
                             result.http_request_count += 1
                             if http_uri:
                                 upper_uri = http_uri.upper()
