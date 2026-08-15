@@ -95,13 +95,15 @@ class LabelsLog:
         timestamp_col: str = "timestamp",
         src_ip_col: Optional[str] = "src_ip",
         attacker_ip: Optional[str] = "10.0.0.10",
+        victim_ip: Optional[str] = None,
     ) -> pd.DataFrame:
         """
         Apply ground-truth labels to a flow DataFrame.
 
         Labelling rule (matches CICIDS2017 methodology):
-            - If src_ip == attacker_ip AND the timestamp is within a
-              recorded attack window → label = <attack name>
+            - If src_ip == attacker_ip (or victim_ip, see below) AND the
+              timestamp is within a recorded attack window → label =
+              <attack name>
             - Otherwise → label = BENIGN
 
         Parameters
@@ -118,6 +120,14 @@ class LabelsLog:
         attacker_ip : str | None
             The attacker's IP.  Used to restrict labelling to flows
             originating from the attacker.
+        victim_ip : str | None
+            The victim's IP. Attacks that spoof their source IP (e.g.
+            DDoSSYNFlood's --rand-source) never match attacker_ip on either
+            side of a flow, so without this fallback every such flow falls
+            through to BENIGN despite being squarely inside the attack's
+            time window. Matching on the victim instead is safe here since
+            each labelled window is attack-only -- no concurrent benign
+            traffic is generated during it.
 
         Returns
         -------
@@ -143,13 +153,19 @@ class LabelsLog:
 
             time_mask = (df[timestamp_col] >= w_start) & (df[timestamp_col] <= w_stop)
 
-            if src_ip_col and attacker_ip:
+            if src_ip_col and (attacker_ip or victim_ip):
                 # Match attacker on EITHER src or dst so bidirectional flows
                 # (where the canonical key may store victim IP as src_ip) are
-                # still correctly identified as attack traffic.
+                # still correctly identified as attack traffic. Also match on
+                # victim_ip as a fallback for spoofed-source attacks, where
+                # neither side of the flow is ever the real attacker_ip.
                 ip_col = df[src_ip_col].astype(str)
                 dst_col = df["dst_ip"].astype(str) if "dst_ip" in df.columns else ip_col
-                ip_mask = (ip_col == attacker_ip) | (dst_col == attacker_ip)
+                ip_mask = pd.Series(False, index=df.index)
+                if attacker_ip:
+                    ip_mask |= (ip_col == attacker_ip) | (dst_col == attacker_ip)
+                if victim_ip:
+                    ip_mask |= (ip_col == victim_ip) | (dst_col == victim_ip)
                 mask = time_mask & ip_mask
             else:
                 mask = time_mask

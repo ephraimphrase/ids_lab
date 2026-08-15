@@ -384,6 +384,7 @@ def run_verification(
 def run_flow_extraction(
     outdir: Path,
     attacker_ip: str,
+    victim_ip: str,
 ) -> Path:
     _print_banner("PHASE 7 — Flow Extraction & Labelling (parallel)")
     labels_log = outdir / "labels.log"
@@ -419,7 +420,7 @@ def run_flow_extraction(
 
         with _log_lock:
             if log:
-                df = log.label_flows(df, attacker_ip=attacker_ip)
+                df = log.label_flows(df, attacker_ip=attacker_ip, victim_ip=victim_ip)
             else:
                 df["label"] = label_guess
 
@@ -553,7 +554,7 @@ def main() -> None:
             if args.verify_only:
                 run_verification(outdir, args.attacker_ip)
             if args.extract_only:
-                run_flow_extraction(outdir, args.attacker_ip)
+                run_flow_extraction(outdir, args.attacker_ip, args.victim_ip)
         finally:
             _restore_ownership(outdir)
         return
@@ -613,7 +614,7 @@ def main() -> None:
             run_verification(outdir, args.attacker_ip)
 
         if not args.skip_extract:
-            run_flow_extraction(outdir, args.attacker_ip)
+            run_flow_extraction(outdir, args.attacker_ip, args.victim_ip)
 
         _print_banner("Pipeline complete!")
         print(f"  All outputs saved to: {outdir}")
