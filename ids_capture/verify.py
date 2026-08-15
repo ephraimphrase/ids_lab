@@ -346,10 +346,10 @@ class Verifier:
             return r.ssh_packet_count > 50
 
         if "BRUTE" in label_up or "WEBBRUTE" in label_up:
-            return r.http_request_count > 20
+            return r.http_request_count > 5
 
         if "SQL" in label_up or "SQLI" in label_up:
-            return r.sql_keyword_count > 0 and r.http_request_count > 5
+            return r.sql_keyword_count > 0 and r.http_request_count > 1
 
         if "DOS" in label_up or "FLOOD" in label_up or "SYN" in label_up:
             return r.peak_pps > 1000 or r.syn_only_count > 10_000
