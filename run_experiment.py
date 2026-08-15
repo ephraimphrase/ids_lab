@@ -539,6 +539,25 @@ def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
 
+    # verify-only / extract-only never touch the network -- no interface
+    # needed, so handle them before any interface listing/validation.
+    if args.verify_only or args.extract_only:
+        outdir = Path(args.outdir).expanduser().resolve()
+        outdir.mkdir(parents=True, exist_ok=True)
+        print(f"\n{'='*60}")
+        print("  IDS DISSERTATION — PACKET CAPTURE PIPELINE")
+        print(f"{'='*60}")
+        print(f"  Output dir : {outdir}")
+        print(f"{'='*60}\n")
+        try:
+            if args.verify_only:
+                run_verification(outdir, args.attacker_ip)
+            if args.extract_only:
+                run_flow_extraction(outdir, args.attacker_ip)
+        finally:
+            _restore_ownership(outdir)
+        return
+
     # List interfaces and exit if no interface given
     available_ifaces = list_interfaces()
     if not args.interface:
@@ -573,18 +592,8 @@ def main() -> None:
 
     try:
         # ------------------------------------------------------------------
-        # verify-only / extract-only shortcuts
-        # ------------------------------------------------------------------
-        if args.verify_only:
-            run_verification(outdir, args.attacker_ip)
-            return
-
-        if args.extract_only:
-            run_flow_extraction(outdir, args.attacker_ip)
-            return
-
-        # ------------------------------------------------------------------
         # Normal pipeline
+        # (verify-only / extract-only already handled and returned above)
         # ------------------------------------------------------------------
         if not args.skip_benign:
             run_benign(args.interface, outdir, args.benign_duration, args.extra_filter)
