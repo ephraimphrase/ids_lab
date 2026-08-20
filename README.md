@@ -256,9 +256,9 @@ Look through the output for `tshark` — it will be listed under either "profile
 If it's enforcing, relax it:
 ```bash
 ls /etc/apparmor.d/ | grep -i tshark
-sudo aa-complain /etc/apparmor.d/usr.bin.tshark
+sudo aa-complain /etc/apparmor.d/tshark
 ```
-(Use the exact filename the `ls` command shows you, in case it's different.)
+(Use the exact filename the `ls` command shows you — it's just `tshark`, not `usr.bin.tshark`, on at least some Ubuntu versions.)
 
 ---
 
